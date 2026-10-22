@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 try:
@@ -23,7 +24,7 @@ except ImportError:                 # a node from before the rename
     from mb_extension import Extension, Refused  # type: ignore[no-redef]
 
 from . import lockfiles
-from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
+from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds, merge_aliases
 from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, thread_link
 from .store import Book, store_for
 
@@ -99,6 +100,21 @@ def scan(folders: list[str]) -> tuple[list[Path], dict[tuple, list[str]], dict[t
     return files, where, hits
 
 
+LOOK_UP = 40      # advisories a check looks up; the rest are listed by id
+
+
+def look_up(ids: list[str]) -> dict[str, Advisory | None]:
+    """Each advisory's details, a few at a time; one that can't be had is listed by its id alone."""
+    def one(aid: str) -> Advisory | None:
+        try:
+            return feeds.advisory(aid)
+        except ValueError as e:
+            ext.log(f"couldn't look up {aid}: {e}")
+            return None
+    with ThreadPoolExecutor(8) as pool:
+        return dict(zip(ids, pool.map(one, ids), strict=True))
+
+
 def check_folders(folders: list[str], project: str | None, by: str = "") -> dict:
     files, where, hits = scan(folders)
     if not files:
@@ -107,7 +123,8 @@ def check_folders(folders: list[str], project: str | None, by: str = "") -> dict
     for key, ids in hits.items():
         for i in ids:
             by_advisory.setdefault(i, []).append(key)
-    details = {i: feeds.advisory(i) for i in list(by_advisory)[:40]}
+    details = look_up(list(by_advisory)[:LOOK_UP])
+    by_advisory = merge_aliases(by_advisory, details)
     found, opened, lines = [], [], []
     b = book() if project else None
     for aid, keys in sorted(by_advisory.items()):

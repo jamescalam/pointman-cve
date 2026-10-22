@@ -2,8 +2,9 @@
 
 - **Recent:** GitHub's advisory database (`api.github.com/advisories`), newest first, reviewed and malware
   advisories across ecosystems, with CVE ids, severities and the versions that fix them. No sign-in needed.
-- **Our versions:** OSV.dev (`api.osv.dev`), asked in one batch for every package and version our lockfiles
-  pin, and then for each advisory it names. It covers CVE, GHSA and malicious-package ids.
+- **Our versions and any one advisory:** OSV.dev (`api.osv.dev`), asked in one batch for every package and
+  version our lockfiles pin, and then for each advisory it names. It covers CVE, GHSA, RUSTSEC, PYSEC and
+  malicious-package ids, with no hourly limit: GitHub's 60 an hour are kept for the recent list.
 """
 
 from __future__ import annotations
@@ -103,6 +104,24 @@ def from_osv(v: dict) -> Advisory:
                     kind="malware" if vid.startswith("MAL-") else "reviewed", packages=pkgs)
 
 
+def merge_aliases(by_advisory: dict[str, list[tuple]], details: dict[str, Advisory | None]) -> dict[str, list[tuple]]:
+    """One entry an advisory: OSV names the same one under each database's id (GHSA-…, RUSTSEC-…)."""
+    out: dict[str, list[tuple]] = {}
+    seen: dict[str, str] = {}
+    for aid, keys in by_advisory.items():
+        a = details.get(aid)
+        names = {aid.upper(), *(i.upper() for i in (a.ids() if a else []))}
+        first = next((seen[n] for n in names if n in seen), None)
+        if first is None:
+            out[aid] = list(keys)
+            first = aid
+        else:
+            out[first] += [k for k in keys if k not in out[first]]
+        for n in names:
+            seen.setdefault(n, first)
+    return out
+
+
 class Feeds:
     def __init__(self, fetch: Fetch = fetch_json):
         self.fetch = fetch
@@ -125,13 +144,12 @@ class Feeds:
         return out
 
     def advisory(self, aid: str) -> Advisory | None:
-        """One advisory by any of its ids: GitHub's for a GHSA id, else OSV's (which knows CVE ids too)."""
+        """One advisory by any of its ids, from OSV (GHSA and CVE ids too)."""
         aid = aid.strip()
+        if aid.upper().startswith(("CVE-", "GHSA-")):
+            aid = aid[:5].upper() + aid[5:]
         try:
-            if aid.upper().startswith("GHSA-"):
-                return from_github(self.fetch(f"{GITHUB}/{urllib.parse.quote(aid)}", None))  # type: ignore[arg-type]
-            got = self.fetch(f"{OSV}/vulns/{urllib.parse.quote(aid.upper() if aid.upper().startswith('CVE-') else aid)}",
-                             None)
+            got = self.fetch(f"{OSV}/vulns/{urllib.parse.quote(aid)}", None)
             return from_osv(got) if isinstance(got, dict) and got.get("id") else None
         except ValueError as e:
             if "answered 404" in str(e):

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from pointman_cve import lockfiles
-from pointman_cve.feeds import Feeds, from_github, from_osv
+from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
 from pointman_cve.store import Book, DirStore
 
@@ -119,6 +119,21 @@ class FeedTests(unittest.TestCase):
         self.assertTrue(seen["url"].endswith("/querybatch"))
         self.assertEqual(seen["body"]["queries"][0]["package"], {"ecosystem": "crates.io", "name": "rustls-webpki"})
         self.assertEqual(seen["body"]["queries"][1]["package"]["ecosystem"], "PyPI")
+
+    def test_any_advisory_comes_from_osv(self):
+        asked = []
+
+        def fetch(url, body):
+            asked.append(url)
+            return OSV_VULN
+        self.assertEqual(Feeds(fetch).advisory("ghsa-xxxx-yyyy-zzzz").cve, "CVE-2026-9999")
+        self.assertEqual(asked, ["https://api.osv.dev/v1/vulns/GHSA-xxxx-yyyy-zzzz"])
+
+    def test_one_entry_an_advisory_under_its_other_ids(self):
+        rust = ("rust", "rustls-webpki", "0.103.15")
+        got = merge_aliases({"GHSA-xxxx-yyyy-zzzz": [rust], "CVE-2026-9999": [rust], "RUSTSEC-2026-1": [rust]},
+                            {"GHSA-xxxx-yyyy-zzzz": from_osv(OSV_VULN), "CVE-2026-9999": None, "RUSTSEC-2026-1": None})
+        self.assertEqual(got, {"GHSA-xxxx-yyyy-zzzz": [rust], "RUSTSEC-2026-1": [rust]})
 
     def test_an_unknown_advisory_is_none(self):
         def fetch(url, body):

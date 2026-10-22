@@ -4,7 +4,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.1.1"
+version = "0.1.2"
 publisher = "pointman-ai"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.1,<1"
