@@ -29,6 +29,7 @@ from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, thread_link
 from .store import Book, store_for
 
 SHOWN = 12                          # advisories a command's text lists
+LISTED = 30                         # impacts cve.impacts' text lists
 
 ext = Extension()
 feeds = Feeds()
@@ -296,8 +297,9 @@ def impacts_cmd(job):
     if not found:
         return {"text": "No impacts recorded" + (f" for {project}" if project else "") + "."}
     lines = [f"- **{i.advisory[0]}** {i.project}: {i.status}" + (f", fixed in {i.fixed_in}" if i.fixed_in else "")
-             for i in sorted(found, key=lambda i: i.found, reverse=True)[:30]]
-    return {"text": f"{len(found)} impacts:\n" + "\n".join(lines),
+             for i in sorted(found, key=lambda i: i.found, reverse=True)[:LISTED]]
+    more = f"\n…and {len(found) - LISTED} more in the pane." if len(found) > LISTED else ""
+    return {"text": f"{len(found)} impacts:\n" + "\n".join(lines) + more,
             "pane": {"open": "cve", "target": {"view": "impacts", **({"project": project} if project else {})}}}
 
 

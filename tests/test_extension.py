@@ -112,6 +112,16 @@ class ExtensionTests(unittest.TestCase):
         kind, got = self.run_command("cve.impacts", {"project": "MB"})
         self.assertEqual(got["result"]["text"].count("fixed, fixed in release 36"), 2)
 
+    def test_a_long_list_says_how_many_more_are_in_the_pane(self):
+        ids = ", ".join(f"RUSTSEC-2026-{n:04}" for n in range(1, 33))
+        kind, got = self.run_command("cve.add", {"advisory": ids, "project": "MB", "status": "affected"})
+        self.assertEqual(kind, "done", got)
+        kind, got = self.run_command("cve.impacts", {"project": "MB"})
+        text = got["result"]["text"]
+        self.assertTrue(text.startswith("32 impacts:"), text)
+        self.assertEqual(text.count("\n- **"), 30)
+        self.assertTrue(text.endswith("\n…and 2 more in the pane."), text)
+
     def test_refusals_say_what_to_do(self):
         kind, got = self.run_command("cve.set", {"advisory": "CVE-2026-404", "project": "MB", "status": "fixed"})
         self.assertIn("isn't recorded for MB: add it with /cve add", got["error"])
