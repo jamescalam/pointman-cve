@@ -1,0 +1,107 @@
+# A CVE tracker: recent advisories, which ones hit the versions your lockfiles pin, and your own record of
+# each one that touched a project, kept as this extension's files in the workspace.
+
+[extension]
+id = "cve"
+name = "CVE tracker"
+version = "0.1.0"
+publisher = "pointman-ai"
+summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
+node = ">=0.1,<1"
+platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+
+[run]
+command = ["python", "-m", "pointman_cve"]
+runtime = "python3.12"
+
+[permissions]
+network = true                   # GitHub's advisory database and OSV.dev
+post = true                      # the daily check's findings, in the thread its setting names
+
+[settings]
+type = "object"
+
+[settings.properties.folders]
+type = "array"
+items = { type = "string" }
+title = "Folders to check"
+description = "Folders whose lockfiles (Cargo.lock, uv.lock, poetry.lock, go.sum, package-lock.json) the daily check reads."
+default = []
+
+[settings.properties.project]
+type = "string"
+title = "Project"
+description = "A project's key (MB): the daily check opens an impact there for each advisory it finds. Empty: it only reports."
+default = ""
+
+[settings.properties.thread]
+type = "integer"
+title = "Thread"
+description = "Where the daily check posts what's new. 0: it doesn't post."
+minimum = 0
+default = 0
+
+[settings.properties.check_hours]
+type = "number"
+title = "Check every"
+description = "Hours between checks of the folders. 0: never."
+minimum = 0
+default = 24
+
+[settings.properties.ecosystem]
+type = "string"
+title = "Ecosystem"
+description = "What /cve recent shows by default: all, rust, pip, go, npm, rubygems, maven, nuget, composer or swift."
+default = "all"
+
+[[commands]]
+kind = "cve.recent"
+title = "Recent advisories"
+params = { type = "object", properties = { ecosystem = { type = "string", description = "all, rust, pip, go, npm, …; left out, the setting." }, days = { type = "integer", minimum = 1, maximum = 90, description = "How far back; 7 if left out." } } }
+slash = "recent"
+summary = "Advisories published lately, newest first: /cve recent rust 14"
+
+[[commands]]
+kind = "cve.check"
+title = "Check lockfiles against advisories"
+params = { type = "object", properties = { folder = { type = "string", description = "A folder to check; left out, the folders setting." }, project = { type = "string", description = "A project's key: opens an impact there for each advisory found." } } }
+slash = "check"
+summary = "Which advisories hit the versions a folder's lockfiles pin: /cve check ~/Documents/app MB"
+
+[[commands]]
+kind = "cve.add"
+title = "Record an advisory that touched a project"
+params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string", description = "CVE-…, GHSA-…, or a short name for one without an id." }, project = { type = "string", description = "The project's key: MB." }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"] }, note = { type = "string" }, justification = { type = "string", enum = ["not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected"], description = "Why it's not_affected." }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"], description = "Ours, beside the published one." }, title = { type = "string" }, package = { type = "string", description = "Where it hit: the package." }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string", description = "The lockfile." }, repo = { type = "string", description = "owner/repo." }, pr = { type = "string", description = "PR or commit links, comma-separated." }, thread = { type = "string", description = "Pointman threads, comma-separated." }, task = { type = "string", description = "Task refs, comma-separated: MB-588." }, by = { type = "string", description = "Who found it." } } }
+slash = "add"
+summary = "Record an advisory that touched a project: /cve add CVE-2026-1234 MB"
+
+[[commands]]
+kind = "cve.set"
+title = "Update a recorded impact"
+params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string" }, project = { type = "string" }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"] }, pr = { type = "string", description = "PR or commit links to add, comma-separated." }, thread = { type = "string", description = "Threads to add." }, task = { type = "string", description = "Task refs to add." }, fixed_in = { type = "string", description = "The release or version that fixed it." }, note = { type = "string" }, justification = { type = "string", enum = ["not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected"] }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"] }, title = { type = "string" }, package = { type = "string" }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string" }, repo = { type = "string" } } }
+slash = "set"
+summary = "Update an impact: /cve set CVE-2026-1234 MB fixed pr=https://github.com/…"
+
+[[commands]]
+kind = "cve.show"
+title = "An advisory and our record of it"
+params = { type = "object", required = ["advisory"], properties = { advisory = { type = "string" } } }
+slash = "show"
+summary = "An advisory, and every project's record of it: /cve show CVE-2026-1234"
+
+[[commands]]
+kind = "cve.impacts"
+title = "Our recorded impacts"
+params = { type = "object", properties = { project = { type = "string" }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"] } } }
+slash = "impacts"
+summary = "Every advisory recorded as touching a project: /cve impacts MB"
+
+[[events]]
+name = "cve.status"
+description = "When the folders were last checked, how many advisories hit them, and how many were new."
+
+[[panes]]
+id = "cve"
+title = "CVE tracker"
+format = "blocks"
+opens = ["command", "menu"]

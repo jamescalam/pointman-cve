@@ -1,0 +1,153 @@
+"""Where advisories come from. We never keep or edit them: they're fetched when asked for.
+
+- **Recent:** GitHub's advisory database (`api.github.com/advisories`), newest first, reviewed and malware
+  advisories across ecosystems, with CVE ids, severities and the versions that fix them. No sign-in needed.
+- **Our versions:** OSV.dev (`api.osv.dev`), asked in one batch for every package and version our lockfiles
+  pin, and then for each advisory it names. It covers CVE, GHSA and malicious-package ids.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+GITHUB = "https://api.github.com/advisories"
+OSV = "https://api.osv.dev/v1"
+TIMEOUT = 20
+CACHE_FOR = 600          # seconds a recent list is reused
+BATCH = 500              # OSV's querybatch limit is 1000
+
+# our ecosystem names (as GitHub's) → OSV's
+OSV_ECOSYSTEM = {"rust": "crates.io", "pip": "PyPI", "go": "Go", "npm": "npm", "rubygems": "RubyGems",
+                 "maven": "Maven", "nuget": "NuGet", "composer": "Packagist", "swift": "SwiftURL"}
+GITHUB_ECOSYSTEM = {v: k for k, v in OSV_ECOSYSTEM.items()}
+
+Fetch = Callable[[str, bytes | None], object]
+
+
+def fetch_json(url: str, body: bytes | None = None) -> object:
+    """GET (or POST with a JSON body) and the JSON answer; a ValueError saying what went wrong. CVE_OFFLINE=1
+    (tests) answers every call that way."""
+    if os.environ.get("CVE_OFFLINE") == "1":
+        raise ValueError(f"offline: {urllib.parse.urlsplit(url).netloc} not asked")
+    req = urllib.request.Request(url, data=body, headers={
+        "Accept": "application/json", "User-Agent": "pointman-cve",
+        **({"Content-Type": "application/json"} if body is not None else {})})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 403 and "rate limit" in (e.read() or b"").decode("utf-8", "replace").lower():
+            raise ValueError("GitHub's advisory database is rate-limited for now (60 an hour without "
+                             "sign-in): try again in a while") from None
+        raise ValueError(f"{urllib.parse.urlsplit(url).netloc} answered {e.code}") from None
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise ValueError(f"couldn't reach {urllib.parse.urlsplit(url).netloc}: {e}") from None
+
+
+@dataclass
+class Advisory:
+    id: str                               # GHSA, CVE, OSV or MAL id
+    aliases: list[str]
+    summary: str
+    severity: str                         # critical, high, medium, low, unknown
+    published: str
+    url: str
+    kind: str = "reviewed"                # reviewed or malware
+    packages: list[dict] = field(default_factory=list)   # {ecosystem, name, vulnerable, fixed}
+    score: float | None = None
+
+    @property
+    def cve(self) -> str | None:
+        return next((a for a in [self.id, *self.aliases] if a.startswith("CVE-")), None)
+
+    def ids(self) -> list[str]:
+        """Its ids, the CVE first when there is one."""
+        out = [self.cve] if self.cve else []
+        return out + [i for i in [self.id, *self.aliases] if i not in out]
+
+
+def from_github(a: dict) -> Advisory:
+    pkgs = []
+    for v in a.get("vulnerabilities") or []:
+        p = v.get("package") or {}
+        pkgs.append({"ecosystem": p.get("ecosystem") or "", "name": p.get("name") or "",
+                     "vulnerable": v.get("vulnerable_version_range") or "",
+                     "fixed": v.get("first_patched_version") or ""})
+    cvss = (a.get("cvss") or {}).get("score")
+    return Advisory(id=a.get("ghsa_id") or "", aliases=[a["cve_id"]] if a.get("cve_id") else [],
+                    summary=a.get("summary") or "", severity=a.get("severity") or "unknown",
+                    published=a.get("published_at") or "", url=a.get("html_url") or "",
+                    kind=a.get("type") or "reviewed", packages=pkgs,
+                    score=cvss if isinstance(cvss, (int, float)) else None)
+
+
+def from_osv(v: dict) -> Advisory:
+    pkgs = []
+    for aff in v.get("affected") or []:
+        p = aff.get("package") or {}
+        fixed = [e["fixed"] for r in aff.get("ranges") or [] for e in r.get("events") or [] if "fixed" in e]
+        pkgs.append({"ecosystem": GITHUB_ECOSYSTEM.get(p.get("ecosystem"), p.get("ecosystem") or ""),
+                     "name": p.get("name") or "", "vulnerable": "", "fixed": ", ".join(fixed)})
+    sev = ((v.get("database_specific") or {}).get("severity") or "unknown").lower()
+    sev = {"moderate": "medium"}.get(sev, sev)
+    vid = v.get("id") or ""
+    return Advisory(id=vid, aliases=list(v.get("aliases") or []), summary=v.get("summary") or v.get("details", "")[:200],
+                    severity=sev, published=v.get("published") or "", url=f"https://osv.dev/vulnerability/{vid}",
+                    kind="malware" if vid.startswith("MAL-") else "reviewed", packages=pkgs)
+
+
+class Feeds:
+    def __init__(self, fetch: Fetch = fetch_json):
+        self.fetch = fetch
+        self._recent: dict[tuple, tuple[float, list[Advisory]]] = {}
+
+    def recent(self, ecosystem: str | None = None, days: int = 7, limit: int = 30) -> list[Advisory]:
+        """Advisories published in the last `days`, newest first: one ecosystem (GitHub's name), or all."""
+        key = (ecosystem, days, limit)
+        hit = self._recent.get(key)
+        if hit and time.time() - hit[0] < CACHE_FOR:
+            return hit[1]
+        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
+        q = {"per_page": str(min(limit, 100)), "sort": "published", "direction": "desc",
+             "published": f">={since}"}
+        if ecosystem:
+            q["ecosystem"] = ecosystem
+        got = self.fetch(f"{GITHUB}?{urllib.parse.urlencode(q)}", None)
+        out = [from_github(a) for a in got if isinstance(a, dict)] if isinstance(got, list) else []
+        self._recent[key] = (time.time(), out)
+        return out
+
+    def advisory(self, aid: str) -> Advisory | None:
+        """One advisory by any of its ids: GitHub's for a GHSA id, else OSV's (which knows CVE ids too)."""
+        aid = aid.strip()
+        try:
+            if aid.upper().startswith("GHSA-"):
+                return from_github(self.fetch(f"{GITHUB}/{urllib.parse.quote(aid)}", None))  # type: ignore[arg-type]
+            got = self.fetch(f"{OSV}/vulns/{urllib.parse.quote(aid.upper() if aid.upper().startswith('CVE-') else aid)}",
+                             None)
+            return from_osv(got) if isinstance(got, dict) and got.get("id") else None
+        except ValueError as e:
+            if "answered 404" in str(e):
+                return None
+            raise
+
+    def affecting(self, pinned: list[tuple[str, str, str]]) -> dict[tuple[str, str, str], list[str]]:
+        """Which of (ecosystem, name, version) have advisories, by OSV id."""
+        out: dict[tuple[str, str, str], list[str]] = {}
+        for i in range(0, len(pinned), BATCH):
+            chunk = pinned[i:i + BATCH]
+            body = json.dumps({"queries": [{"package": {"ecosystem": OSV_ECOSYSTEM.get(e, e), "name": n}, "version": v}
+                                           for e, n, v in chunk]}).encode()
+            got = self.fetch(f"{OSV}/querybatch", body)
+            for key, res in zip(chunk, (got or {}).get("results") or [], strict=False):  # type: ignore[union-attr]
+                ids = [v["id"] for v in (res or {}).get("vulns") or [] if isinstance(v, dict) and v.get("id")]
+                if ids:
+                    out[key] = ids
+        return out

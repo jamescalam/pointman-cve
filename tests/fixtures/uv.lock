@@ -1,0 +1,11 @@
+version = 1
+
+[[package]]
+name = "litellm"
+version = "1.107.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "myapp"
+version = "0.1.0"
+source = { editable = "." }
