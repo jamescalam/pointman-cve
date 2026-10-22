@@ -43,7 +43,7 @@ Set **Folders to check** and the extension checks them once a day (**Check every
 
 - **Network:** GitHub's advisory database (60 requests an hour without signing in) and OSV.dev.
 - **Post:** the daily check's findings, only in the thread you set.
-- It reads only lockfiles in folders the node lets extensions use: your agents' project folders.
+- It reads only lockfiles, and only under `~/Documents` (its `folders` permission, shown when it's added): a folder anywhere else is refused.
 
 ## Developing
 

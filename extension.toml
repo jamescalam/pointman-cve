@@ -4,7 +4,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.1.0"
+version = "0.1.1"
 publisher = "pointman-ai"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.1,<1"
@@ -17,6 +17,7 @@ runtime = "python3.12"
 [permissions]
 network = true                   # GitHub's advisory database and OSV.dev
 post = true                      # the daily check's findings, in the thread its setting names
+folders = ["~/Documents"]         # lockfiles only, for /cve check and the daily check: where projects live
 
 [settings]
 type = "object"
@@ -25,7 +26,7 @@ type = "object"
 type = "array"
 items = { type = "string" }
 title = "Folders to check"
-description = "Folders whose lockfiles (Cargo.lock, uv.lock, poetry.lock, go.sum, package-lock.json) the daily check reads."
+description = "Folders under ~/Documents whose lockfiles (Cargo.lock, uv.lock, poetry.lock, go.sum, package-lock.json) the daily check reads."
 default = []
 
 [settings.properties.project]
