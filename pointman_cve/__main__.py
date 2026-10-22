@@ -165,13 +165,35 @@ def check(job):
 
 @ext.command("cve.add")
 def add(job):
+    """Record one advisory, or several that one fix covers (`advisory` a list, or comma-separated), for a project."""
     p = job.params
-    advisory, project = str(p.get("advisory") or "").strip(), str(p.get("project") or "").strip().upper()
-    if not advisory or not project:
+    advisories, project = split(p.get("advisory")), str(p.get("project") or "").strip().upper()
+    if not advisories or not project:
         raise Refused("/cve add <advisory> <project>: CVE-2026-1234 MB")
     b = book()
-    if b.load(project, advisory):
-        raise Refused(f"{advisory} is already recorded for {project}: change it with /cve set")
+    if len(advisories) == 1:
+        if b.load(project, advisories[0]):
+            raise Refused(f"{advisories[0]} is already recorded for {project}: change it with /cve set")
+        imp, version = add_one(b, advisories[0], project, p)
+        return {"text": f"Recorded {advisories[0]} for {project} as {imp.status} ({imp.path}, version {version}).",
+                "impact": imp.path, "version": version,
+                "pane": {"open": "cve", "target": {"view": "impacts", "project": project}}}
+    done, had = [], []
+    for advisory in advisories:
+        if b.load(project, advisory):
+            had.append(advisory)
+            continue
+        imp, _ = add_one(b, advisory, project, p)
+        done.append(imp.path)
+    status = str(p.get("status") or "investigating")
+    text = f"Recorded {len(done)} advisories for {project} as {status}."
+    if had:
+        text += f" Already recorded (change them with /cve set): {', '.join(had)}."
+    return {"text": text, "impacts": done, "already": had,
+            "pane": {"open": "cve", "target": {"view": "impacts", "project": project}}}
+
+
+def add_one(b: Book, advisory: str, project: str, p: dict) -> tuple[Impact, int]:
     try:
         a = feeds.advisory(advisory)
     except ValueError:
@@ -183,27 +205,38 @@ def add(job):
                                                      ("critical", "high", "medium", "low") else "unknown")),
                  found_by=str(p.get("by") or ""))
     apply(imp, p)
-    version = b.save(imp)
-    return {"text": f"Recorded {advisory} for {project} as {imp.status} ({imp.path}, version {version}).",
-            "impact": imp.path, "version": version,
-            "pane": {"open": "cve", "target": {"view": "impacts", "project": project}}}
+    return imp, b.save(imp)
 
 
 @ext.command("cve.set")
 def set_(job):
+    """Change one recorded advisory, or several (`advisory` a list, or comma-separated), in a project."""
     p = job.params
-    advisory, project = str(p.get("advisory") or "").strip(), str(p.get("project") or "").strip().upper()
+    advisories, project = split(p.get("advisory")), str(p.get("project") or "").strip().upper()
+    if not advisories:
+        raise Refused("/cve set <advisory> <project> status=…: CVE-2026-1234 MB")
     b = book()
-    imp = b.load(project, advisory)
-    if imp is None:
-        raise Refused(f"{advisory} isn't recorded for {project}: add it with /cve add {advisory} {project}")
-    for key in ("status", "justification", "severity", "title"):
-        if p.get(key):
-            setattr(imp, key, str(p[key]))
-    apply(imp, p)
-    version = b.save(imp)
-    return {"text": f"{advisory} in {project} is {imp.status} (version {version} of {imp.path}).",
-            "impact": imp.path, "version": version}
+    changed, missing = [], []
+    for advisory in advisories:
+        imp = b.load(project, advisory)
+        if imp is None:
+            if len(advisories) == 1:
+                raise Refused(f"{advisory} isn't recorded for {project}: add it with /cve add {advisory} {project}")
+            missing.append(advisory)
+            continue
+        for key in ("status", "justification", "severity", "title"):
+            if p.get(key):
+                setattr(imp, key, str(p[key]))
+        apply(imp, p)
+        changed.append((advisory, imp, b.save(imp)))
+    if len(advisories) == 1:
+        advisory, imp, version = changed[0]
+        return {"text": f"{advisory} in {project} is {imp.status} (version {version} of {imp.path}).",
+                "impact": imp.path, "version": version}
+    text = f"Changed {len(changed)} advisories in {project}."
+    if missing:
+        text += f" Not recorded (add them with /cve add): {', '.join(missing)}."
+    return {"text": text, "impacts": [i.path for _, i, _ in changed], "missing": missing}
 
 
 def apply(imp: Impact, p: dict) -> None:

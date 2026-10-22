@@ -95,6 +95,23 @@ class ExtensionTests(unittest.TestCase):
         self.assertIn("offline", got["result"]["text"])                  # the feed wasn't asked
         self.assertIn("- MB: fixed, fixed in release 35", got["result"]["text"])
 
+    def test_one_fix_records_several_advisories_at_once(self):
+        kind, got = self.run_command("cve.add", {"advisory": "RUSTSEC-2026-0367, RUSTSEC-2026-0368", "project": "MB",
+                                                 "package": "zip", "version": "8.6.0", "status": "affected"})
+        self.assertEqual(kind, "done", got)
+        self.assertEqual(got["result"]["impacts"], ["impacts/mb/rustsec-2026-0367.toml",
+                                                    "impacts/mb/rustsec-2026-0368.toml"])
+        kind, got = self.run_command("cve.add", {"advisory": ["RUSTSEC-2026-0368", "RUSTSEC-2026-0369"],
+                                                 "project": "MB", "status": "affected"})
+        self.assertEqual(got["result"]["already"], ["RUSTSEC-2026-0368"])
+        kind, got = self.run_command("cve.set", {"advisory": "RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0370",
+                                                 "project": "MB", "status": "fixed", "fixed_in": "release 36",
+                                                 "pr": "https://github.com/pointman-ai/pointman/commit/d9ea9a8b"})
+        self.assertEqual((kind, got["result"]["missing"]), ("done", ["RUSTSEC-2026-0370"]), got)
+        self.assertIn("Changed 2 advisories in MB", got["result"]["text"])
+        kind, got = self.run_command("cve.impacts", {"project": "MB"})
+        self.assertEqual(got["result"]["text"].count("fixed, fixed in release 36"), 2)
+
     def test_refusals_say_what_to_do(self):
         kind, got = self.run_command("cve.set", {"advisory": "CVE-2026-404", "project": "MB", "status": "fixed"})
         self.assertIn("isn't recorded for MB: add it with /cve add", got["error"])
