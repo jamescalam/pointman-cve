@@ -8,6 +8,7 @@ CVE_FILES_DIR (tests only) keeps them in a folder instead, a version a file.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -15,6 +16,14 @@ from .impacts import Impact, path_of
 
 NEEDS_NODE = ("this node can't keep an extension's files yet (files.put, list and get): it needs the "
               "Pointman release that brings them")
+
+
+# a path as the node and core take one: relative, at most 200 characters of a-z 0-9 . _ - /, with no ..
+PATH = re.compile(r"[a-z0-9._/-]{1,200}")
+
+
+def path_ok(path: str) -> bool:
+    return bool(PATH.fullmatch(path)) and not path.startswith("/") and ".." not in path
 
 
 class Store:
@@ -59,6 +68,8 @@ class DirStore(Store):
         return sorted(found, key=lambda p: int(p.name.rsplit("@", 1)[1]))
 
     def put(self, path: str, text: str) -> int:
+        if not path_ok(path):                       # refused as the node refuses it
+            raise RuntimeError("path: relative, at most 200 characters of a-z 0-9 . _ - /, with no ..")
         version = len(self._versions(path)) + 1
         target = self.root / f"{path}@{version}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +109,7 @@ class Book:
         return self.store.put(impact.path, impact.to_toml())
 
     def all(self, project: str | None = None) -> list[Impact]:
-        prefix = f"impacts/{project.upper()}/" if project else "impacts/"
+        prefix = f"impacts/{project.lower()}/" if project else "impacts/"
         out = []
         for f in self.store.list(prefix):
             text = self.store.get(f["path"])

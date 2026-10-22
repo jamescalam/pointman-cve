@@ -23,18 +23,16 @@ def now() -> str:
 
 
 def slug(advisory: str) -> str:
-    """An advisory id as a file name: CVE-2026-1234 and GHSA-ab12-… as they are, anything else lowercased."""
-    a = advisory.strip()
-    if re.match(r"(?i)^(CVE|GHSA|MAL|OSV|RUSTSEC|PYSEC|GO)-", a):
-        a = a.upper() if a.upper().startswith(("CVE-", "MAL-", "OSV-")) else a
-    a = re.sub(r"[^A-Za-z0-9._-]+", "-", a).strip("-.")
+    """An advisory id as a file name, lowercased: extension files are paths of a-z 0-9 . _ - / (the record keeps
+    the id as written)."""
+    a = re.sub(r"[^a-z0-9._-]+", "-", advisory.strip().lower()).strip("-.")
     if not a:
         raise ValueError("an advisory id: CVE-…, GHSA-…, or a short name for one without")
     return a[:80]
 
 
 def path_of(project: str, advisory: str) -> str:
-    return f"impacts/{project.upper()}/{slug(advisory)}.toml"
+    return f"impacts/{project.lower()}/{slug(advisory)}.toml"
 
 
 @dataclass

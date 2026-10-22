@@ -75,7 +75,7 @@ class ExtensionTests(unittest.TestCase):
         kind, got = self.run_command("cve.add", {"advisory": "CVE-2026-1234", "project": "mb", "package": "rustls-webpki",
                                                  "version": "0.103.15", "thread": "17856", "note": "found in the sweep"})
         self.assertEqual(kind, "done", got)
-        self.assertEqual(got["result"]["impact"], "impacts/MB/CVE-2026-1234.toml")
+        self.assertEqual(got["result"]["impact"], "impacts/mb/cve-2026-1234.toml")
         self.assertEqual(got["result"]["pane"], {"open": "cve", "target": {"view": "impacts", "project": "MB"}})
         kind, got = self.run_command("cve.add", {"advisory": "CVE-2026-1234", "project": "MB"})
         self.assertEqual(kind, "failed")
@@ -84,7 +84,7 @@ class ExtensionTests(unittest.TestCase):
         kind, got = self.run_command("cve.set", {"advisory": "CVE-2026-1234", "project": "MB", "status": "fixed",
                                                  "pr": "https://github.com/pointman-ai/pointman/pull/1", "fixed_in": "release 35"})
         self.assertEqual((kind, got["result"]["version"]), ("done", 2), got)
-        text = (self.dir / "files" / "impacts" / "MB" / "CVE-2026-1234.toml@2").read_text()
+        text = (self.dir / "files" / "impacts" / "mb" / "cve-2026-1234.toml@2").read_text()
         self.assertIn('status = "fixed"', text)
         self.assertIn('threads = ["pointman://thread/17856"]', text)
         self.assertIn("found in the sweep", text)

@@ -7,7 +7,7 @@ from pathlib import Path
 from pointman_cve import lockfiles
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
-from pointman_cve.store import Book, DirStore
+from pointman_cve.store import Book, DirStore, path_ok
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -29,14 +29,16 @@ class ImpactTests(unittest.TestCase):
         self.assertIn('status = "fixed"', text)
         self.assertIn("[[where]]", text)
         self.assertEqual(Impact.from_toml(text), imp)
-        self.assertEqual(imp.path, "impacts/MB/emudhra-g3-distrust.toml")
+        self.assertEqual(imp.path, "impacts/mb/emudhra-g3-distrust.toml")
 
     def test_paths_from_advisory_ids(self):
-        self.assertEqual(path_of("mb", "cve-2026-1234"), "impacts/MB/CVE-2026-1234.toml")
-        self.assertEqual(slug("GHSA-cw65-gx24-rc82"), "GHSA-cw65-gx24-rc82")
+        self.assertEqual(path_of("MB", "CVE-2026-1234"), "impacts/mb/cve-2026-1234.toml")
+        self.assertEqual(slug("GHSA-cw65-gx24-rc82"), "ghsa-cw65-gx24-rc82")
         self.assertEqual(slug("../../etc/passwd"), "etc-passwd")
         with self.assertRaises(ValueError):
             slug("///")
+        for project, advisory in [("MB", "CVE-2026-1234"), ("pfe", "GHSA-AbCd-1234-zz99"), ("X", "eMudhra G3 distrust")]:
+            self.assertTrue(path_ok(path_of(project, advisory)), path_of(project, advisory))   # the node takes it
 
     def test_checks(self):
         for change, says in [({"status": "done"}, "status"), ({"project": "my project"}, "project"),
