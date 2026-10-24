@@ -8,7 +8,7 @@ Keep up with security advisories, and keep a shared record of the ones that touc
 - **`/cve show <advisory>`** shows an advisory and every project's record of it. **`/cve impacts [project]`** lists the records.
 - A pane in the app shows recent advisories, or your impacts with a count of each status.
 
-Agents run the same commands with `run_on_machine` (`cve.recent`, `cve.check`, `cve.add`…). `pointman cve …` on the command line acts as the person, so it asks them to approve it, and agents shouldn't use it.
+Agents run the same commands with `create_job` (`cve.recent`, `cve.check`, `cve.add`…). `pointman cve …` on the command line acts as the person, so it asks them to approve it, and agents shouldn't use it.
 
 ## Your records
 
