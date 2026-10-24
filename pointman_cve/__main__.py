@@ -18,10 +18,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-try:
-    from pointman_extension import Extension, Refused
-except ImportError:                 # a node from before the rename
-    from mb_extension import Extension, Refused  # type: ignore[no-redef]
+import pointman_extension_types as types
+from pointman_extension import Extension, Refused
+from pointman_extension_types import Block, Chart, Empty, Layout, PaneContent, PaneOpenResponse, Text, Tone
 
 from . import lockfiles
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds, merge_aliases
@@ -37,7 +36,7 @@ lock = threading.Lock()
 
 
 def book() -> Book:
-    return Book(store_for(lambda m, p: ext.request(m, p, timeout=30)))
+    return Book(store_for(lambda message: ext.request(message, timeout=30)))
 
 
 def machine() -> str:
@@ -306,31 +305,48 @@ def impacts_cmd(job):
 # ------------------------------------------------------------------ the pane
 
 
-def recent_blocks(eco: str | None, days: int) -> list[dict]:
+def heading(name: str, text: str, subtitle: str) -> Block:
+    return Block(name=name, text=Text(markdown=text, heading=Text.Heading(subtitle=subtitle)))
+
+
+def table(name: str, columns: list[str], rows: list[tuple[str, list]]) -> Block:
+    """A table whose rows are (id, cells)."""
+    return Block(name=name, chart=Chart(type=Chart.Type.TYPE_TABLE, data=Chart.Data(
+        columns=columns, rows=[cells for _, cells in rows], row_ids=[rid for rid, _ in rows])))
+
+
+def stat(name: str, label: str, value: int, tone: Tone) -> Block:
+    return Block(name=name, chart=Chart(type=Chart.Type.TYPE_STAT, title=label, tone=tone,
+                                        data=Chart.Data(columns=["value"], rows=[[value]])))
+
+
+def empty(name: str, title: str, note: str) -> Block:
+    return Block(name=name, empty=Empty(title=title, note=note))
+
+
+def recent_blocks(eco: str | None, days: int) -> list[Block]:
     found = feeds.recent(eco, days, limit=50)
-    rows = [{"id": a.id or str(n), "cells": [a.ids()[0], ", ".join(p["name"] for p in a.packages[:2]) or "-",
-                                             a.severity + (" · malware" if a.kind == "malware" else ""),
-                                             a.published[:10]]} for n, a in enumerate(found)]
-    return [{"type": "heading", "id": "h", "text": f"Advisories, last {days} days",
-             "subtitle": eco or "every ecosystem"},
-            {"type": "table", "id": "t", "columns": ["Advisory", "Package", "Severity", "Published"], "rows": rows}
-            if rows else {"type": "empty", "id": "t", "title": "Nothing new", "note": "No advisories in that time."}]
+    rows = [(a.id or str(n), [a.ids()[0], ", ".join(p["name"] for p in a.packages[:2]) or "-",
+                              a.severity + (" · malware" if a.kind == "malware" else ""), a.published[:10]])
+            for n, a in enumerate(found)]
+    return [heading("h", f"Advisories, last {days} days", eco or "every ecosystem"),
+            table("t", ["Advisory", "Package", "Severity", "Published"], rows)
+            if rows else empty("t", "Nothing new", "No advisories in that time.")]
 
 
-def impact_blocks(project: str | None) -> list[dict]:
+def impact_blocks(project: str | None) -> list[Block]:
     found = sorted(book().all(project), key=lambda i: i.found, reverse=True)
     counts = {s: sum(1 for i in found if i.status == s) for s in STATUSES}
-    tones = {"investigating": "warn", "affected": "bad", "not_affected": "neutral", "fixed": "good"}
-    stats = [{"type": "stat", "id": f"s{s}", "label": s.replace("_", " ").capitalize(), "value": counts[s],
-              "tone": tones[s]} for s in STATUSES]
-    rows = [{"id": i.path, "cells": [i.advisory[0], i.project, i.status.replace("_", " "), i.fixed_in or "-",
-                                     (i.prs[0].rsplit("/", 2)[-2] + "/" + i.prs[0].rsplit("/", 1)[-1]) if i.prs else "-"]}
+    tones = {"investigating": Tone.TONE_WARN, "affected": Tone.TONE_BAD, "not_affected": Tone.TONE_NEUTRAL,
+             "fixed": Tone.TONE_GOOD}
+    stats = [stat(f"s{s}", s.replace("_", " ").capitalize(), counts[s], tones[s]) for s in STATUSES]
+    rows = [(i.path, [i.advisory[0], i.project, i.status.replace("_", " "), i.fixed_in or "-",
+                      (i.prs[0].rsplit("/", 2)[-2] + "/" + i.prs[0].rsplit("/", 1)[-1]) if i.prs else "-"])
             for i in found]
-    return [{"type": "heading", "id": "h", "text": "Our impacts", "subtitle": project or "every project"},
-            {"type": "stack", "id": "st", "axis": "h", "children": stats},
-            {"type": "table", "id": "t", "columns": ["Advisory", "Project", "Status", "Fixed in", "PR"], "rows": rows}
-            if rows else {"type": "empty", "id": "t", "title": "Nothing recorded yet",
-                          "note": "/cve add <advisory> <project> records one."}]
+    return [heading("h", "Our impacts", project or "every project"),
+            Block(name="st", layout=Layout(stack=Layout.Stack(children=stats, horizontal=True))),
+            table("t", ["Advisory", "Project", "Status", "Fixed in", "PR"], rows)
+            if rows else empty("t", "Nothing recorded yet", "/cve add <advisory> <project> records one.")]
 
 
 @ext.pane("cve")
@@ -345,13 +361,13 @@ def open_pane(pane):
             blocks = recent_blocks(ecosystem_of(t.get("ecosystem")), int(t.get("days") or 7))
             title = "Recent advisories"
     except (ValueError, RuntimeError) as e:
-        blocks, title = [{"type": "empty", "id": "e", "title": "Couldn't load it", "note": str(e)}], "CVE tracker"
+        blocks, title = [empty("e", "Couldn't load it", str(e))], "CVE tracker"
 
     @pane.on_input
     def tapped(event):
         raise Refused("the CVE pane is read-only: change a record with /cve set")
 
-    return {"title": title, "blocks": blocks}
+    return PaneOpenResponse(title=title, content=PaneContent(blocks=blocks))
 
 
 # ------------------------------------------------------------------ the daily check
@@ -388,8 +404,9 @@ def daily() -> None:
     thread = int(ext.settings.get("thread") or 0)
     if new and thread:
         ids = ", ".join(x["advisory"][0] for x in new[:10])
-        ext.request("board.post", {"thread_id": thread, "text": f"New advisories hit {machine()}'s lockfiles: {ids}.\n\n"
-                                                                + got["text"][:3500]})
+        ext.request(types.BoardPostRequest(thread=types.ThreadId(value=f"thr_{thread}"),
+                                           text=f"New advisories hit {machine()}'s lockfiles: {ids}.\n\n"
+                                                + got["text"][:3500]))
 
 
 ext.every(600, daily, lane="check")

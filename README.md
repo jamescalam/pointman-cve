@@ -51,6 +51,6 @@ Set **Folders to check** and the extension checks them once a day (**Check every
 PYTHONPATH=.:tests python3 -m unittest discover -s tests
 ```
 
-Set `POINTMAN_EXTENSIONS_SDK` to the node's Python SDK folder to run the end-to-end tests too. They keep records in a folder (`CVE_FILES_DIR`) and never touch the network (`CVE_OFFLINE=1`).
+Set `POINTMAN_EXTENSIONS_SDK` to the node's Python SDK folder (one that speaks the typed protocol, with `pointman_extension_types.py`) to run the end-to-end tests too. They run the extension under the SDK's stand-in node, with a stand-in for the node's files, and never touch the network (`CVE_OFFLINE=1`).
 
 MIT licensed.
