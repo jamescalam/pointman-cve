@@ -1,6 +1,6 @@
 """Our impacts, kept as the extension's own files in the workspace through its node (`files.put`, `files.list`,
-`files.get`: Pointman's EXT-62). Every machine with the extension reads the same files, and every change is
-a new version.
+`files.get`: Pointman's EXT-62, as their typed messages). Every machine with the extension reads the same files,
+and every change is a new version.
 
 CVE_FILES_DIR (tests only) keeps them in a folder instead, a version a file.
 """
@@ -27,30 +27,37 @@ def path_ok(path: str) -> bool:
 
 
 class Store:
-    def __init__(self, request: Callable[[str, dict], dict]):
+    """The node's files, asked with the SDK's request messages (pointman_extension_types, which only the node's SDK
+    has: imported when one is made, so the rest of this module runs without it)."""
+
+    def __init__(self, request: Callable):
+        import pointman_extension_types as types
+        self.types = types
         self.request = request
 
-    def _call(self, method: str, params: dict) -> dict:
+    def _call(self, message):
         try:
-            return self.request(method, params) or {}
+            return self.request(message)
         except RuntimeError as e:
             if "no method" in str(e) or "unknown method" in str(e):
                 raise RuntimeError(NEEDS_NODE) from None
             raise
 
     def put(self, path: str, text: str) -> int:
-        return int(self._call("files.put", {"path": path, "text": text}).get("version") or 0)
+        return self._call(self.types.FilesPutRequest(path=path, text=text)).version
 
     def list(self, prefix: str) -> list[dict]:
-        return list(self._call("files.list", {"prefix": prefix}).get("files") or [])
+        return [{"path": f.path, "version": f.version}
+                for f in self._call(self.types.FilesListRequest(prefix=prefix)).files]
 
     def get(self, path: str) -> str | None:
         try:
-            return self._call("files.get", {"path": path}).get("text")
+            got = self._call(self.types.FilesGetRequest(path=path)).file
         except RuntimeError as e:
             if "no file" in str(e):
                 return None
             raise
+        return got.text if got else None
 
 
 class DirStore(Store):
@@ -89,7 +96,7 @@ class DirStore(Store):
         return versions[-1].read_text(encoding="utf-8") if versions else None
 
 
-def store_for(request: Callable[[str, dict], dict]) -> Store:
+def store_for(request: Callable) -> Store:
     folder = os.environ.get("CVE_FILES_DIR")
     return DirStore(folder) if folder else Store(request)
 
