@@ -12,3 +12,4 @@ edge cases. Every line is copied as it was, apart from the one noted below.
 | `Gemfile.lock` | [rails/rails@ad242026bf6a](https://github.com/rails/rails/blob/ad242026bf6a/Gemfile.lock) | a PATH section, platform builds of one gem |
 | `composer.lock` | [composer/composer@b56a3f558a53](https://github.com/composer/composer/blob/b56a3f558a53/composer.lock) | two packages and one dev package |
 | `workflows/ci.yml` | [astral-sh/uv@656d02b61460](https://github.com/astral-sh/uv/blob/656d02b61460/.github/workflows/ci.yml) | its first 130 lines: reusable and local workflows, commit pins with tag comments |
+| `cvss3.tsv` | [GitHub's advisory database](https://github.com/advisories) API, the 100 newest reviewed advisories on 26 Oct 2026 | the 66 with a CVSS 3 vector: each vector and the score GitHub gives it (CC-BY 4.0) |

@@ -8,6 +8,8 @@
 - **GitHub Actions** are the exception: OSV keeps their advisories but doesn't compare their versions (asked with
   one, it finds nothing). Each action is asked by name alone, and its pinned tag is checked against each
   advisory's ranges here.
+- **Exploitation:** CISA's Known Exploited Vulnerabilities list (CC0, its own feed) and FIRST's EPSS scores (free,
+  attribution requested: https://www.first.org/epss), by CVE id, each fetched at most twice a day.
 """
 
 from __future__ import annotations
@@ -23,9 +25,17 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from . import cvss
+
 GITHUB = "https://api.github.com/advisories"
 OSV = os.environ.get("CVE_OSV_URL") or "https://api.osv.dev/v1"       # CVE_OSV_URL: tests' stand-in OSV
+KEV = (os.environ.get("CVE_KEV_URL")                                       # CVE_KEV_URL, CVE_EPSS_URL: tests'
+       or "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json")
+EPSS = os.environ.get("CVE_EPSS_URL") or "https://api.first.org/data/v1/epss"
 TIMEOUT = 20
+SIGNALS_FOR = 12 * 3600  # seconds KEV's list and EPSS scores are reused: both change once a day
+SIGNALS_DOWN = 600       # and how long, when they couldn't be had, before they're asked again
+EPSS_ASK = 100           # CVEs an EPSS request asks for: its page, and well under its 2,000 characters
 CACHE_FOR = 600          # seconds a recent list is reused
 BATCH = 500              # OSV's querybatch limit is 1000
 
@@ -68,7 +78,11 @@ class Advisory:
     url: str
     kind: str = "reviewed"                # reviewed or malware
     packages: list[dict] = field(default_factory=list)   # {ecosystem, name, vulnerable, fixed}
-    score: float | None = None
+    score: float | None = None            # its CVSS base score: GitHub's, or OSV's 3.x vector scored
+    cvss: str = ""                        # OSV's CVSS vector (3.x, else 4.0)
+    kev: bool | None = None               # in CISA's Known Exploited Vulnerabilities list; None: not known
+    kev_added: str = ""
+    epss: float | None = None             # FIRST's EPSS: the chance it's exploited in the next 30 days, 0 to 1
 
     @property
     def cve(self) -> str | None:
@@ -102,12 +116,20 @@ def from_osv(v: dict) -> Advisory:
         fixed = [e["fixed"] for r in aff.get("ranges") or [] for e in r.get("events") or [] if "fixed" in e]
         pkgs.append({"ecosystem": GITHUB_ECOSYSTEM.get(p.get("ecosystem"), p.get("ecosystem") or ""),
                      "name": p.get("name") or "", "vulnerable": "", "fixed": ", ".join(fixed)})
+    vectors = [x for x in (v.get("severity") or []) + [x for aff in v.get("affected") or [] for x in aff.get("severity") or []]
+               if isinstance(x, dict) and x.get("score")]
+    v3 = next((x["score"] for x in vectors if x.get("type") == "CVSS_V3"), "")
+    v4 = next((x["score"] for x in vectors if x.get("type") == "CVSS_V4"), "")
+    base = cvss.score(v3) if v3 else None
     sev = ((v.get("database_specific") or {}).get("severity") or "unknown").lower()
     sev = {"moderate": "medium"}.get(sev, sev)
+    if sev not in ("critical", "high", "medium", "low"):
+        sev = cvss.severity(base)                     # RUSTSEC and PYSEC name none: their vector says
     vid = v.get("id") or ""
     return Advisory(id=vid, aliases=list(v.get("aliases") or []), summary=v.get("summary") or v.get("details", "")[:200],
                     severity=sev, published=v.get("published") or "", url=f"https://osv.dev/vulnerability/{vid}",
-                    kind="malware" if vid.startswith("MAL-") else "reviewed", packages=pkgs)
+                    kind="malware" if vid.startswith("MAL-") else "reviewed", packages=pkgs, score=base,
+                    cvss=v3 or v4)
 
 
 def merge_aliases(by_advisory: dict[str, list[tuple]], details: dict[str, Advisory | None]) -> dict[str, list[tuple]]:
@@ -132,6 +154,63 @@ class Feeds:
     def __init__(self, fetch: Fetch = fetch_json):
         self.fetch = fetch
         self._recent: dict[tuple, tuple[float, list[Advisory]]] = {}
+        self._kev: tuple[float, dict[str, str]] | None = None
+        self._epss: dict[str, tuple[float, float | None]] = {}
+        self._down: tuple[float, str] = (0.0, "")
+
+    def exploited(self, cves: list[str]) -> tuple[dict[str, str] | None, dict[str, float], str]:
+        """For these CVE ids: the ones in CISA's KEV list (the day each was added; None when the list couldn't be
+        had), their EPSS scores, and why either couldn't be had ("" when both were)."""
+        cves = sorted({c.upper() for c in cves if c and c.upper().startswith("CVE-")})
+        if not cves:
+            return {}, {}, ""
+        if time.time() < self._down[0]:
+            return None, {}, self._down[1]
+        why, kev, scores = [], None, {}
+        try:
+            listed = self.known_exploited()
+            kev = {c: listed[c] for c in cves if c in listed}
+        except ValueError as e:
+            why.append(f"CISA's KEV list: {e}")
+        try:
+            scores = self.epss_scores(cves)
+        except ValueError as e:
+            why.append(f"EPSS: {e}")
+        if why:
+            self._down = (time.time() + SIGNALS_DOWN, "; ".join(why))
+        return kev, scores, "; ".join(why)
+
+    def known_exploited(self) -> dict[str, str]:
+        """CISA's Known Exploited Vulnerabilities list: each CVE in it, and the day it was added."""
+        if self._kev and time.time() - self._kev[0] < SIGNALS_FOR:
+            return self._kev[1]
+        got = self.fetch(KEV, None)
+        listed = got.get("vulnerabilities") if isinstance(got, dict) else None
+        if not isinstance(listed, list):
+            raise ValueError("it came back in a shape this doesn't know")
+        self._kev = (time.time(), {str(x["cveID"]).upper(): str(x.get("dateAdded") or "")
+                                   for x in listed if isinstance(x, dict) and x.get("cveID")})
+        return self._kev[1]
+
+    def epss_scores(self, cves: list[str]) -> dict[str, float]:
+        """FIRST's EPSS score of each CVE that has one, asked a page at a time."""
+        now = time.time()
+        ask = [c for c in cves if now - self._epss.get(c, (0.0, None))[0] >= SIGNALS_FOR]
+        for i in range(0, len(ask), EPSS_ASK):
+            chunk = ask[i:i + EPSS_ASK]
+            got = self.fetch(f"{EPSS}?cve={','.join(chunk)}", None)
+            rows = got.get("data") if isinstance(got, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("it came back in a shape this doesn't know")
+            scores = {}
+            for row in rows:
+                try:
+                    scores[str(row["cve"]).upper()] = float(row["epss"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            for c in chunk:
+                self._epss[c] = (now, scores.get(c))
+        return {c: e for c in cves if (e := self._epss.get(c, (0.0, None))[1]) is not None}
 
     def recent(self, ecosystem: str | None = None, days: int = 7, limit: int = 30) -> list[Advisory]:
         """Advisories published in the last `days`, newest first: one ecosystem (GitHub's name), or all."""

@@ -94,6 +94,9 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(got["impact"], "impacts/mb/cve-2026-1234.toml")
         self.assertEqual(got["pane"], {"open": "cve", "target": {"view": "impacts", "project": "MB"}})
         self.assertIn("already recorded", self.refused("cve.add", {"advisory": "CVE-2026-1234", "project": "MB"}))
+        listed = self.run_command("cve.impacts", {"project": "MB"})["text"]             # offline: it says why
+        self.assertIn("Known-exploited and EPSS couldn't be had (CISA's KEV list: offline", listed)
+        self.assertIn("open ones are in severity order", listed)
 
         got = self.run_command("cve.set", {"advisory": "CVE-2026-1234", "project": "MB", "status": "fixed",
                                            "pr": "https://github.com/pointman-ai/pointman/pull/1", "fixed_in": "release 35"})
@@ -133,6 +136,7 @@ class ExtensionTests(unittest.TestCase):
         self.assertTrue(text.startswith("32 impacts:"), text)
         self.assertEqual(text.count("\n- **"), 30)
         self.assertTrue(text.endswith("\n…and 2 more in the pane."), text)
+        self.assertNotIn("couldn't be had", text)                     # RUSTSEC ids: KEV and EPSS know only CVEs
 
     def test_refusals_say_what_to_do(self):
         self.assertIn("isn't recorded for MB: add it with /cve add",
@@ -207,8 +211,12 @@ class ExtensionTests(unittest.TestCase):
         return f"http://127.0.0.1:{server.server_port}/v1"
 
     def scanning(self, *projects):
+        """The extension again with these projects, asking the stand-in OSV (and its KEV and EPSS) at self.url."""
+        base = self.url.removesuffix("/v1")
+        env = ({"CVE_OSV_URL": self.url, "CVE_KEV_URL": f"{base}/kev.json", "CVE_EPSS_URL": f"{base}/epss"}
+               if self.url else {"CVE_OFFLINE": "1"})
         self.node.stop()
-        self.node = self.start(settings={"projects": list(projects)}, env={"CVE_OSV_URL": self.url})
+        self.node = self.start(settings={"projects": list(projects)}, env=env)
 
     def test_a_scan_opens_a_record_for_a_hit_at_one_ref_and_finds_it_gone_at_the_other(self):
         repo = Repo(self.dir / "app" / "repo")
@@ -218,7 +226,7 @@ class ExtensionTests(unittest.TestCase):
         self.scanning({"key": "mb", "repo": str(repo.checkout), "ref": "v1"}, {"key": "WEB", "repo": str(self.dir / "app" / "web")})
         got = self.run_command("cve.scan", {})
         hit = {"advisory": "CVE-2026-9999", "package": "rustls-webpki", "version": "0.103.15", "ecosystem": "rust",
-               "severity": "medium", "fixed": "0.103.16"}
+               "severity": "medium", "fixed": "0.103.16", "kev": True, "epss": 0.42, "cvss": 4.8}
         self.assertEqual({k: got[k] for k in ("new", "reopened", "gone", "open", "failed")},
                          {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 0})
         mb, web = got["projects"]
@@ -228,6 +236,10 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(web["note"], "read as files, not from git: it isn't a git repo")
         self.assertTrue(got["text"].startswith("Scanned MB, WEB: 1 new, 0 reopened, 0 gone, 1 open."), got["text"])
         self.assertIn("Read as files, not from git: it isn't a git repo.", got["text"])
+        self.assertIn("- new: **CVE-2026-9999** (medium 4.8, known exploited, EPSS 42%) rust rustls-webpki", got["text"])
+        self.assertTrue(got["text"].endswith("EPSS scores: FIRST, https://www.first.org/epss"), got["text"])
+        listed = self.run_command("cve.impacts", {"project": "MB"})["text"]           # open ones fix-first
+        self.assertIn("- **CVE-2026-9999** MB: investigating, known exploited, EPSS 42%", listed)
         record = self.files.versions["impacts/mb/cve-2026-9999.toml"]
         self.assertEqual(len(record), 1)
         self.assertIn('status = "investigating"', record[0])
@@ -242,7 +254,8 @@ class ExtensionTests(unittest.TestCase):
         got = self.run_command("cve.scan", {"project": "mb"})                  # origin/main, after a fetch
         self.assertEqual([p["project"] for p in got["projects"]], ["MB"])
         self.assertEqual((got["new"], got["gone"], got["open"]), (0, 1, 1))     # nothing new still answers
-        self.assertEqual((got["projects"][0]["commit"], got["projects"][0]["gone"]), (repo.v2, [hit]))
+        gone = {**hit, "kev": None, "epss": None, "cvss": None}                 # gone isn't looked up again
+        self.assertEqual((got["projects"][0]["commit"], got["projects"][0]["gone"]), (repo.v2, [gone]))
         self.assertEqual(len(self.files.versions["impacts/mb/cve-2026-9999.toml"]), 1)      # left as it was
         self.assertEqual(self.node.events["cve.scanned"]["gone"], 1)
         self.assertNotIn("0.103.99", {v for _, _, v in self.asked})             # never the working tree

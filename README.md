@@ -3,11 +3,11 @@
 Keep up with security advisories, and keep a shared record of the ones that touched your projects.
 
 - **`/cve recent [ecosystem] [days]`** lists advisories published lately, newest first: `/cve recent rust 14`. They come from GitHub's advisory database, across ecosystems or one of them (rust, pip, go, npm and others).
-- **`/cve scan [project]`** scans every project in the **Projects** setting, or the one named: it reads each repo's lockfiles from git at its ref and asks OSV.dev which of the pinned versions have advisories, in one batch. Each new hit opens an impact as investigating. The answer lists what's new, what's reopened (a fixed record hit again) and what's gone (an open record whose versions have left the ref), with each project's open count.
+- **`/cve scan [project]`** scans every project in the **Projects** setting, or the one named: it reads each repo's lockfiles from git at its ref and asks OSV.dev which of the pinned versions have advisories, in one batch. Each new hit opens an impact as investigating. The answer lists what's new, what's reopened (a fixed record hit again) and what's gone (an open record whose versions have left the ref), with each project's open count. Each hit says whether it's known to be exploited, its EPSS score and its CVSS score, and the lists come fix-first (see below).
 - **What it reads:** Cargo.lock, uv.lock, poetry.lock, `requirements*.txt` (and `.txt` files in a `requirements` folder: their `==` pins), go.sum, package-lock.json, pnpm-lock.yaml, yarn.lock (Yarn 1 and 2+), Gemfile.lock and composer.lock, up to 4 folders down, skipping dependency and build folders. It also reads the actions the repo's own workflows use (`.github/workflows/*.yml`). An action counts when pinned to a version tag, or to a commit with its tag in a comment (`@3d3c42e… # v7.0.1`). That comment is taken at its word: if it names the wrong tag, the answer is wrong too. A branch, such as `@main`, doesn't count. OSV doesn't compare Actions versions, so the extension checks each pinned tag against the advisory's ranges itself. A major tag such as `v4` counts as the newest release of v4.
 - **`/cve check <folder> [project]`** does the same for one folder, read as it is on disk. Name a project and it opens an impact there for each one not yet recorded.
 - **`/cve add <advisory> <project>`** records an advisory that touched a project. **`/cve set`** updates the record: its status, where it hit, and the PRs, threads and tasks that dealt with it.
-- **`/cve show <advisory>`** shows an advisory and every project's record of it. **`/cve impacts [project]`** lists the records.
+- **`/cve show <advisory>`** shows an advisory and every project's record of it. **`/cve impacts [project]`** lists the records, the open ones first, fix-first.
 - A pane in the app shows recent advisories, or your impacts with a count of each status.
 
 Agents run the same commands with `create_job` (`cve.scan`, `cve.recent`, `cve.check`, `cve.add`…). `pointman cve …` on the command line acts as the person, so it asks them to approve it, and agents shouldn't use it.
@@ -53,9 +53,22 @@ A project that can't be read (its folder is missing, its ref unknown, or git fai
 
 Nothing runs on its own. A scan runs when someone asks for one, or when a workflow calls `cve.scan`. When it's done it sends the event `cve.scanned`, with the counts in all and for each project. A scan with nothing new still answers, so a workflow can branch on `new`.
 
+## Fix first
+
+Open records, and each scan's new and reopened hits, are sorted in this order:
+
+1. **Known exploited:** in CISA's [Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog.
+2. **Likely to be exploited:** a higher [EPSS](https://www.first.org/epss) score, FIRST's estimate of the chance it's exploited in the next 30 days, compared in whole percentage points (0.05% against 0.03% is noise, so severity decides).
+3. **Severity:** critical, high, medium, low, unknown.
+4. **CVSS:** the higher base score.
+
+Both lists are by CVE id, so an advisory with no CVE (many RUSTSEC ones) isn't in KEV and has no EPSS. Each is fetched at most twice a day. If one can't be reached, the answer says so and the order falls back to severity. The CVSS score comes from OSV's CVSS 3.x vector. A RUSTSEC or PYSEC advisory that names no severity gets one from that score. A CVSS 4.0 vector isn't scored here, so its advisory's own severity stands.
+
+The KEV catalog is CC0 and used as published; this extension isn't endorsed by CISA. EPSS scores are free to use, and FIRST asks for credit: answers that show them end with "EPSS scores: FIRST, https://www.first.org/epss".
+
 ## Permissions
 
-- **Network:** GitHub's advisory database (60 requests an hour without signing in) and OSV.dev.
+- **Network:** GitHub's advisory database (60 requests an hour without signing in), OSV.dev, CISA's KEV feed and FIRST's EPSS API.
 - It reads only lockfiles, and only under `~/Documents` (its `folders` permission, shown when it's added): a folder anywhere else is refused. It runs `git fetch`, `git ls-tree` and `git show` in the repos you list, and never changes their working trees or local branches.
 
 ## Developing

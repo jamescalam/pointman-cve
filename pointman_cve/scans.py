@@ -1,6 +1,7 @@
 """What a project's pinned versions mean for its records: the advisories that hit them (from OSV, one each under
-all its ids), a record opened for each new one, and what's reopened, gone and still open. The node's side of a
-scan (settings, folders, the event) is the command's, in __main__."""
+all its ids), a record opened for each new one, and what's reopened, gone and still open, fix-first: known
+exploited (CISA's KEV), then the likeliest to be (FIRST's EPSS), then severity. The node's side of a scan
+(settings, folders, the event) is the command's, in __main__."""
 
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ from .store import Book
 
 OPEN = ("investigating", "affected")
 SHOWN = 12                # hits a project's lines in a scan's text list
+RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
+EPSS_CREDIT = "EPSS scores: FIRST, https://www.first.org/epss"
 
 Found = list[tuple[list[str], Advisory | None, list[tuple[str, str, str]]]]
 
@@ -46,6 +49,46 @@ def advisories(feeds: Feeds, where: dict[tuple, list[str]], limit: int | None = 
             for aid, keys in sorted(by_advisory.items())]
 
 
+def signal(feeds: Feeds, found: Found) -> str:
+    """KEV and EPSS on each advisory found, by its CVE id; "" or why they couldn't be had (they're left None).
+    KEV and EPSS know only CVEs: an advisory without one is not in KEV, and has no EPSS."""
+    details = [a for _, a, _ in found if a]
+    kev, epss, why = feeds.exploited([a.cve for a in details if a.cve])
+    for a in details:
+        cve = (a.cve or "").upper()
+        a.kev = None if kev is None else cve in kev
+        a.kev_added = (kev or {}).get(cve, "")
+        a.epss = epss.get(cve)
+    return why
+
+
+def first(kev: bool | None, epss: float | None, severity: str, score: float | None = None) -> tuple:
+    """Fix-first order's key: known exploited, then EPSS, then severity, then CVSS. EPSS counts by whole percentage
+    points: 0.05% against 0.03% is noise, and severity decides between them."""
+    return (0 if kev else 1, -round(epss or 0.0, 2), RANK.get(severity, 4), -(score or 0.0))
+
+
+def fix_first(records: list[Impact], feeds: Feeds) -> tuple[list[Impact], dict[str, tuple], str]:
+    """Open records first, fix-first, then the rest, newest first; each open one's (kev, epss) by its path, and why
+    they couldn't be had."""
+    open_ = [r for r in records if r.status in OPEN]
+    cve = {r.path: next((i.upper() for i in r.advisory if i.upper().startswith("CVE-")), "") for r in open_}
+    kev, epss, why = feeds.exploited(list(cve.values()))
+    signals = {path: (None if kev is None else c in kev, epss.get(c)) for path, c in cve.items()}
+    open_.sort(key=lambda r: (first(*signals[r.path], r.severity), r.advisory[0]))
+    rest = sorted((r for r in records if r.status not in OPEN), key=lambda r: r.found, reverse=True)
+    return open_ + rest, signals, why
+
+
+def flags(kev: bool | None, epss: float | None) -> str:
+    return (", known exploited" if kev else "") + (f", EPSS {percent(epss)}" if epss is not None else "")
+
+
+def percent(epss: float) -> str:
+    """An EPSS score as people read it: 42%, 0.3%, <0.1%."""
+    return f"{epss:.0%}" if epss >= 0.1 else f"{epss:.1%}" if epss >= 0.001 else "<0.1%"
+
+
 def severity_of(a: Advisory | None) -> str:
     return a.severity if a and a.severity in ("critical", "high", "medium", "low") else "unknown"
 
@@ -60,9 +103,12 @@ def opened(project: str, ids: list[str], a: Advisory | None, where: list[dict], 
                   severity=severity_of(a), found_by=by, where=where)
 
 
-def hit(advisory: str, ecosystem: str, package: str, version: str, severity: str, fixed: str) -> dict:
+def hit(advisory: str, ecosystem: str, package: str, version: str, severity: str, fixed: str,
+        a: Advisory | None = None) -> dict:
+    """A line of a scan's answer: the advisory, where it hits, and its exploitation signals (None: not known)."""
     return {"advisory": advisory, "package": package, "version": version, "ecosystem": ecosystem,
-            "severity": severity, "fixed": fixed}
+            "severity": severity, "fixed": fixed, "kev": a.kev if a else None, "epss": a.epss if a else None,
+            "cvss": a.score if a else None}
 
 
 def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> dict:
@@ -75,7 +121,7 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
     new, reopened, made, hit_ids = [], [], [], set()
     for ids, a, keys in found:
         hit_ids |= {i.upper() for i in ids}
-        rows = [hit(ids[0], e, n, v, severity_of(a), fixed_for(a, n)) for e, n, v in keys]
+        rows = [hit(ids[0], e, n, v, severity_of(a), fixed_for(a, n), a) for e, n, v in keys]
         record = next((by_id[i.upper()] for i in ids if i.upper() in by_id), None)
         if record is None:
             imp = opened(key, ids, a, [{"repo": got.name, "file": f, "package": n, "version": v, "ecosystem": e,
@@ -87,6 +133,8 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
             new += rows
         elif record.status == "fixed":
             reopened += rows
+    for listed in (new, reopened):
+        listed.sort(key=lambda h: (first(h["kev"], h["epss"], h["severity"], h["cvss"]), h["advisory"]))
     gone = []
     for r in records:
         mine = [w for w in r.where if w.get("repo") == got.name and w.get("package")]
@@ -119,10 +167,14 @@ def text(found: list[dict], all_: dict) -> str:
         lines.append(f"\n**{f['project']}**{at}, {f['files']} lockfiles: {len(f['new'])} new, "
                      f"{len(f['reopened'])} reopened, {len(f['gone'])} gone, {f['open']} open.{note}")
         rows = [(kind, h) for kind in ("new", "reopened", "gone") for h in f[kind]]
-        lines += [f"- {kind}: **{h['advisory']}** ({h['severity']}) {h['ecosystem']} {h['package']} {h['version']}"
+        lines += [f"- {kind}: **{h['advisory']}** ({h['severity']}"
+                  + (f" {h['cvss']}" if h.get("cvss") is not None else "") + flags(h.get("kev"), h.get("epss"))
+                  + f") {h['ecosystem']} {h['package']} {h['version']}"
                   + (f", fixed in {h['fixed']}" if h["fixed"] else "") for kind, h in rows[:SHOWN]]
         if len(rows) > SHOWN:
             lines.append(f"- …and {len(rows) - SHOWN} more.")
         if f["opened"]:
             lines.append(f"Opened {len(f['opened'])} records in {f['project']} as investigating.")
+    if any(h.get("epss") is not None for f in found for k in ("new", "reopened") for h in f.get(k, [])):
+        lines.append(f"\n{EPSS_CREDIT}")
     return "\n".join(lines)
