@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.11.0"
+version = "0.12.0"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"
@@ -14,6 +14,10 @@ platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 [run]
 command = ["python", "-m", "pointman_cve"]
 runtime = "python3.12"
+
+[behavior]
+skill = "SKILL.md"               # how agents triage, fix, confirm and mark findings: in every wake on its nodes
+files = ["references"]           # triage.md: each step's detail, and when not affected is right
 
 [permissions]
 network = true                   # GitHub's advisory database, OSV.dev, CISA's KEV feed and FIRST's EPSS
