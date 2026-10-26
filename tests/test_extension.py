@@ -195,24 +195,56 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual((got["skipped"], got["found"]), (1, []))
         self.assertIn("but test data (1 skipped)", got["text"])
 
-    def test_the_pane_shows_our_impacts(self):
-        self.run_command("cve.add", {"advisory": "GHSA-abcd-efgh-ijkl", "project": "PFE", "status": "affected"})
-        view = self.node.open_pane("cve", target={"view": "impacts"})
-        self.assertEqual(view.title, "CVE impacts")
-        self.assertEqual([b.name for b in view.blocks], ["h", "st", "t"])
-        self.assertEqual(view.block("h").text.heading.subtitle, "every project")
-        table = view.block("t").chart
-        self.assertEqual(table.type, types.Chart.Type.TYPE_TABLE)
-        self.assertEqual(table.data.row_ids, ["impacts/pfe/ghsa-abcd-efgh-ijkl.toml"])
-        self.assertEqual(table.data.rows[0][:3], ["GHSA-abcd-efgh-ijkl", "PFE", "affected"])
-        affected = view.block("saffected").chart
-        self.assertEqual((affected.title, affected.data.rows, affected.tone), ("Affected", [[1]], types.Tone.TONE_BAD))
-        self.assertEqual([c.name for c in view.block("st").layout.stack.children],
-                         ["sinvestigating", "saffected", "snot_affected", "sfixed"])
+    def test_the_pane_goes_from_projects_to_a_project_to_a_record_and_back(self):
+        self.run_command("cve.add", {"advisory": "GHSA-abcd-efgh-ijkl", "project": "PFE", "status": "affected",
+                                     "package": "zip", "version": "8.6.0", "fixed_version": "9.0.0"})
+        self.run_command("cve.add", {"advisory": "CVE-2026-5", "project": "MB", "by": "@scanner",
+                                     "note": "zstd-safe in node/Cargo.lock", "package": "zstd-safe", "version": "7.3.0"})
+        self.run_command("cve.add", {"advisory": "MAL-2026-2144", "project": "MB", "status": "not_affected",
+                                     "justification": "component_not_present", "note": "test fixture"})
+        self.run_command("cve.set", {"advisory": "CVE-2026-5", "project": "MB", "status": "affected", "by": "@cvescan",
+                                     "note": "the vault decodes it", "pr": "https://github.com/x/y/pull/3"})
+        view = self.node.open_pane("cve")                                    # it opens on the project picker
+        self.assertEqual((view.title, [b.name for b in view.blocks]), ("CVE tracker", ["h", "projects", "nav"]))
+        picks = view.block("projects").list.items
+        self.assertEqual([(i.id, i.subtitle) for i in picks], [("MB", "1 open · not scanned yet"),
+                                                               ("PFE", "1 open · not scanned yet")])
         self.assertEqual(view.problems, [])
-        with self.assertRaises(InputRefused) as e:
-            view.input("tap", block="t", item="impacts/pfe/ghsa-abcd-efgh-ijkl.toml")
-        self.assertIn("read-only", str(e.exception))
+
+        view.input("tap", block="projects", value="MB")                      # a project
+        self.assertEqual(view.title, "CVE · MB")
+        self.assertEqual([b.name for b in view.blocks],
+                         ["h", "nav", "st", "oh", "open", "ph", "plan", "sh", "scans", "ch", "closed"])
+        (opened,) = view.block("open").list.items
+        self.assertEqual((opened.title, opened.subtitle), ("CVE-2026-5", "affected · zstd-safe 7.3.0"))
+        self.assertEqual([i.subtitle for i in view.block("closed").list.items], ["not affected (component not present)"])
+        self.assertEqual(view.block("saffected").chart.data.rows, [[1]])
+        self.assertEqual(view.block("scans").empty.title, "Not scanned yet")
+        self.assertEqual(view.problems, [])
+
+        view.input("tap", block="open", value=opened.id)                     # a record: its history and evidence
+        self.assertEqual((view.title, view.block("h").text.heading.subtitle), ("CVE-2026-5", "MB · affected"))
+        self.assertEqual([(i.title, i.subtitle) for i in view.block("where").list.items], [("zstd-safe 7.3.0", "")])
+        self.assertEqual([(i.title, i.link) for i in view.block("evidence").list.items],
+                         [("pull/3", "https://github.com/x/y/pull/3")])
+        history = [(i.title, i.subtitle.split(" · ")[0], i.subtitle.split(" · ")[2:]) for i in view.block("history").list.items]
+        self.assertEqual(history, [("investigating → affected", "@cvescan (said)",
+                                    ["the vault decodes it", "https://github.com/x/y/pull/3"]),
+                                   ("investigating", "@scanner (said)", ["zstd-safe in node/Cargo.lock"])])
+        self.assertEqual(view.problems, [])
+
+        view.input("tap", block="nav", value="project:MB")                   # and back
+        self.assertEqual(view.title, "CVE · MB")
+        view.input("tap", block="nav", value="projects")
+        self.assertEqual(view.title, "CVE tracker")
+        for kind, fields in [("tap", {"block": "h", "value": "x"}), ("submit", {"block": "open", "value": {}})]:
+            with self.assertRaises(InputRefused) as e:
+                view.input(kind, **fields)
+            self.assertIn("only shows records: change one with /cve set", str(e.exception))
+        linked = self.node.open_pane("cve", target={"view": "impacts", "project": "PFE"})   # as /cve add links it
+        self.assertEqual(linked.title, "CVE · PFE")
+        self.assertEqual(linked.block("open").list.items[0].subtitle, "affected · zip 8.6.0")
+        self.assertEqual(linked.problems, [])
 
     def test_the_pane_says_why_when_the_feed_cant_be_had(self):
         view = self.node.open_pane("cve", target={"view": "recent", "ecosystem": "rust"})
@@ -308,10 +340,19 @@ class ExtensionTests(unittest.TestCase):
         kept = [k for k in self.files.versions if k.startswith("scans/mb/")]           # the last scan, for the pane
         self.assertEqual(len(kept), 1, kept)
         view = self.node.open_pane("cve", target={"view": "impacts", "project": "MB"})
-        self.assertEqual([b.name for b in view.blocks], ["h", "st", "t", "ph0", "p0"])
-        self.assertEqual(view.block("p0").chart.data.rows, [["rustls-webpki", "0.103.15", "0.103.16", 1]])
-        self.assertIn("at v1 (", view.block("ph0").text.heading.subtitle)
+        (row,) = view.block("open").list.items                               # known exploited, flagged
+        self.assertEqual((row.title, row.badge, row.tone), ("CVE-2026-9999", "KEV", types.Tone.TONE_BAD))
+        self.assertIn("known exploited · EPSS 42%", row.subtitle)
+        (up,) = view.block("plan").list.items
+        self.assertEqual((up.title, up.subtitle), ("rustls-webpki 0.103.15 → 0.103.16",
+                                                   f"fixes 1 · known exploited · node/Cargo.lock · {repo.checkout}"))
+        (last,) = view.block("scans").list.items
+        self.assertTrue(last.subtitle.startswith(f"v1 ({repo.v1[:8]}) · scanned "), last.subtitle)
+        self.assertTrue(last.subtitle.endswith("1 new, 0 gone, 1 open"), last.subtitle)
+        self.assertTrue(view.block("h").text.heading.subtitle.startswith("last scanned "))
         self.assertEqual(view.problems, [])
+        picker = self.node.open_pane("cve")
+        self.assertEqual(picker.block("projects").list.items[0].badge, "KEV")
         record = self.files.versions["impacts/mb/cve-2026-9999.toml"]
         self.assertEqual(len(record), 1)
         self.assertIn('status = "investigating"', record[0])
