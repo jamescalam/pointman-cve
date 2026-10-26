@@ -1,6 +1,6 @@
-"""The package versions a folder's lockfiles pin, by ecosystem (GitHub's names): Cargo.lock (rust), uv.lock and
+"""The package versions a project's lockfiles pin, by ecosystem (GitHub's names): Cargo.lock (rust), uv.lock and
 poetry.lock (pip), go.sum (go) and package-lock.json (npm). Only packages from a registry: a path, a git
-checkout or the project itself has no advisories."""
+checkout or the project itself has no advisories. The same files count in a folder and in a git tree."""
 
 from __future__ import annotations
 
@@ -9,8 +9,13 @@ import os
 import tomllib
 from pathlib import Path
 
+NAMES = ("Cargo.lock", "uv.lock", "poetry.lock", "go.sum", "package-lock.json")
 SKIP = {".git", "node_modules", "target", ".venv", "venv", "vendor", "__pycache__", "dist", "build", ".cache"}
 DEPTH = 4
+
+
+def skipped(folder: str) -> bool:
+    return folder in SKIP or folder.startswith(".")
 
 
 def find(root: Path) -> list[Path]:
@@ -19,19 +24,28 @@ def find(root: Path) -> list[Path]:
     root = Path(root)
     base = len(root.parts)
     for d, dirs, files in os.walk(root):
-        dirs[:] = sorted(x for x in dirs if x not in SKIP and not x.startswith("."))
+        dirs[:] = sorted(x for x in dirs if not skipped(x))
         if len(Path(d).parts) - base >= DEPTH:
             dirs[:] = []
         for f in sorted(files):
-            if f in ("Cargo.lock", "uv.lock", "poetry.lock", "go.sum", "package-lock.json"):
+            if f in NAMES:
                 out.append(Path(d) / f)
     return out
 
 
+def wanted(path: str) -> bool:
+    """Whether a path in a tree (`node/Cargo.lock`) is a lockfile find() would read in a folder."""
+    *folders, name = path.split("/")
+    return name in NAMES and len(folders) <= DEPTH and not any(skipped(f) for f in folders)
+
+
 def pinned(path: Path) -> list[tuple[str, str, str]]:
     """(ecosystem, name, version) for each registry package the lockfile pins."""
-    name = path.name
-    text = path.read_text(encoding="utf-8", errors="replace")
+    return parse(path.name, path.read_text(encoding="utf-8", errors="replace"))
+
+
+def parse(name: str, text: str) -> list[tuple[str, str, str]]:
+    """pinned() of a lockfile's text, by its file name."""
     out: set[tuple[str, str, str]] = set()
     if name == "Cargo.lock":
         for p in tomllib.loads(text).get("package", []):
