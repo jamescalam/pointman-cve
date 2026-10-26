@@ -37,6 +37,28 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(Impact.from_toml(text), imp)
         self.assertEqual(imp.path, "impacts/mb/emudhra-g3-distrust.toml")
 
+    def test_history_and_vex_s_justifications(self):
+        imp = Impact(advisory=["CVE-2026-1"], project="MB")
+        imp.log("cve scan on mac-m4 at origin/main (7f5769fa)", "found at origin/main (7f5769fa)")
+        imp.status, imp.justification = "not_affected", "vulnerable_code_not_in_execute_path"
+        imp.log("@cvescan", "the vault only uses the plain stream encoder", ["https://github.com/x/y/pull/1"],
+                was="investigating", said=True)
+        back = Impact.from_toml(imp.to_toml())
+        self.assertEqual(back, imp)
+        first, second = back.history
+        self.assertEqual((first["by"], first["status"], "was" in first), ("cve scan on mac-m4 at origin/main (7f5769fa)",
+                                                                          "investigating", False))
+        self.assertEqual((second["by_said"], second["was"], second["status"], second["justification"], second["evidence"]),
+                         ("@cvescan", "investigating", "not_affected", "vulnerable_code_not_in_execute_path",
+                          ["https://github.com/x/y/pull/1"]))
+        self.assertNotIn("by", second)                      # only what the caller said, marked as such
+        for old, vex in [("not_present", "component_not_present"), ("not_reachable", "vulnerable_code_not_in_execute_path"),
+                         ("inline_mitigations", "inline_mitigations_already_exist"),
+                         ("protected", "vulnerable_code_cannot_be_controlled_by_adversary")]:
+            text = imp.to_toml().replace('justification = "vulnerable_code_not_in_execute_path"\n', f'justification = "{old}"\n', 1)
+            self.assertEqual(Impact.from_toml(text).justification, vex, old)       # records from before 0.8.0
+            Impact.from_toml(text).check()
+
     def test_paths_from_advisory_ids(self):
         self.assertEqual(path_of("MB", "CVE-2026-1234"), "impacts/mb/cve-2026-1234.toml")
         self.assertEqual(slug("GHSA-cw65-gx24-rc82"), "ghsa-cw65-gx24-rc82")
@@ -57,7 +79,7 @@ class ImpactTests(unittest.TestCase):
                 imp.check()
             self.assertIn(says, str(e.exception))
         ok = self.emudhra()
-        ok.status, ok.justification = "not_affected", "not_reachable"
+        ok.status, ok.justification = "not_affected", "vulnerable_code_not_in_execute_path"
         ok.check()
 
 
@@ -504,6 +526,10 @@ class ScanTests(unittest.TestCase):
         imp = self.book.load("MB", "CVE-2026-9999")
         self.assertEqual((imp.status, imp.confirmed, imp.fixed, got["open"]), ("affected", {}, "", 1))
         self.assertIn("reopened by a test: rustls-webpki 0.103.15 is back (confirmed gone at origin/main", imp.notes[-1])
+        self.assertEqual([(h["by"], h["status"], h.get("was"), h["why"].split(":")[0].split(" (")[0]) for h in imp.history],
+                         [("a test", "investigating", None, "found at v1"),
+                          ("a test", "fixed", None, "confirmed"),
+                          ("a test", "affected", "fixed", "reopened")])
         self.assertEqual(imp.prs, ["https://github.com/x/app/pull/7"])           # the evidence stays, as history
 
     def test_a_record_kept_under_another_id_isn_t_new(self):

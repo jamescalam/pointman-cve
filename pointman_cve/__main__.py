@@ -113,6 +113,7 @@ def check_folder(folder: str, project: str | None) -> dict:
                                                   "fixed_version": scans.fixed_for(a, n, v)}
                                                  for e, n, v in keys for f in where[(e, n, v)][:3]],
                                f"cve check on {machine()}")
+            imp.log(imp.found_by, f"found in {folder}")
             b.save(imp)
             made.append(imp.path)
     head = (f"{len(files)} lockfiles, {len(where)} pinned versions on {machine()}: "
@@ -245,6 +246,32 @@ def scan(job):
     return {"projects": found, **all_, "text": text}
 
 
+def caller(job) -> tuple[str, bool]:
+    """Who's making a change, and whether that's only what the caller said: the node's word for who asked, once its
+    request carries it (MB-672), and then the `by` param is ignored; until then, the `by` the caller gives."""
+    asked = getattr(job.request, "asked_by", None)
+    if asked:
+        return str(getattr(asked, "value", asked)), False
+    return str(job.params.get("by") or "").strip(), True
+
+
+def vex(p: dict) -> None:
+    """not_affected says why, as VEX does: one of its justifications, and a note in our words."""
+    if str(p.get("status") or "") != "not_affected":
+        return
+    j = str(p.get("justification") or "")
+    if j not in JUSTIFICATIONS:
+        raise Refused(f"not_affected needs VEX's justification, one of {', '.join(JUSTIFICATIONS)}"
+                      + (f" (not {j})" if j else "") + ", and a note saying why")
+    if not str(p.get("note") or "").strip():
+        raise Refused(f"not_affected needs a note saying why it's {j} here: note=…")
+
+
+def given(p: dict) -> list[str]:
+    """The evidence a change brings: its PRs, commits and the release it names."""
+    return [*split(p.get("pr")), *split(p.get("commit"))] + ([f"fixed in {p['fixed_in']}"] if p.get("fixed_in") else [])
+
+
 def evidence(p: dict) -> None:
     """Marking a record fixed takes its evidence: a PR, a commit or the release that fixed it. A scan then checks it."""
     if str(p.get("status") or "") == "fixed" and not (split(p.get("pr")) or split(p.get("commit")) or p.get("fixed_in")):
@@ -260,6 +287,9 @@ def add(job):
     if not advisories or not project:
         raise Refused("/cve add <advisory> <project>: CVE-2026-1234 MB")
     evidence(p)
+    vex(p)
+    who, said = caller(job)
+    p = {**p, "by": who, "_said": said}
     b = book()
     if len(advisories) == 1:
         if b.load(project, advisories[0]):
@@ -295,6 +325,7 @@ def add_one(b: Book, advisory: str, project: str, p: dict) -> tuple[Impact, int]
                                                      ("critical", "high", "medium", "low") else "unknown")),
                  found_by=str(p.get("by") or ""))
     apply(imp, p)
+    imp.log(str(p.get("by") or ""), str(p.get("note") or "").strip() or "recorded", given(p), said=bool(p.get("_said")))
     return imp, b.save(imp)
 
 
@@ -309,16 +340,22 @@ def set_(job):
     loaded = [(advisory, b.load(project, advisory)) for advisory in advisories]
     if len(advisories) == 1 and loaded[0][1] is None:
         raise Refused(f"{advisories[0]} isn't recorded for {project}: add it with /cve add {advisories[0]} {project}")
-    evidence(p)                      # before anything is written: one without its evidence changes none
+    evidence(p)                      # before anything is written: one without its evidence or its why changes none
+    vex(p)
+    who, said = caller(job)
     changed, missing = [], []
     for advisory, imp in loaded:
         if imp is None:
             missing.append(advisory)
             continue
+        was = imp.status
         for key in ("status", "justification", "severity", "title"):
             if p.get(key):
                 setattr(imp, key, str(p[key]))
+        if imp.status != "not_affected":
+            imp.justification = ""
         apply(imp, p)
+        imp.log(who, str(p.get("note") or "").strip(), given(p), was, said)
         changed.append((advisory, imp, b.save(imp)))
     if len(advisories) == 1:
         advisory, imp, version = changed[0]
@@ -357,6 +394,21 @@ def apply(imp: Impact, p: dict) -> None:
             imp.where.append(w)
 
 
+def history(i: Impact, shown: int = 10) -> str:
+    """A record's history, newest last: when, who, from and to, why, evidence. A record from before 0.8.0 starts
+    with when it was found."""
+    lines = [] if i.history else [f"{i.found[:10]} {i.found_by or 'someone'}: found"]
+    for h in i.history[-shown:]:
+        step = f"{h.get('was')} → {h.get('status')}" if h.get("was") else str(h.get("status"))
+        who = h.get("by") or (f"{h['by_said']} (said)" if h.get("by_said") else "someone (not said)")
+        lines.append(f"{str(h.get('at'))[:10]} {who}: {step}"
+                     + (f" ({h['justification']})" if h.get("justification") else "")
+                     + (f", {h['why']}" if h.get("why") else "")
+                     + (f" · {', '.join(h['evidence'])}" if h.get("evidence") else ""))
+    more = [f"…{len(i.history) - shown} earlier"] if len(i.history) > shown else []
+    return "".join(f"\n  - {x}" for x in more + lines)
+
+
 def confirmation(i: Impact) -> str:
     """Whether a scan has checked a fixed record: confirmed at a ref, or not yet."""
     if i.status != "fixed":
@@ -385,7 +437,7 @@ def show(job):
         impacts, kept = [], f"\n\nOur records aren't readable here: {e}."
     head = one_line(a) if a else f"{advisory}: {why}."
     ours = "\n".join(f"- {i.project}: {i.status}" + (f" ({i.justification})" if i.justification else "")
-                     + (f", fixed in {i.fixed_in}" if i.fixed_in else "") + confirmation(i)
+                     + (f", fixed in {i.fixed_in}" if i.fixed_in else "") + confirmation(i) + history(i)
                      + (f" · PRs: {', '.join(i.prs)}" if i.prs else "") for i in impacts)
     return {"text": head + (kept or ("\n\nOur record:\n" + ours if ours else "\n\nNot recorded for any project.")),
             "impacts": [i.path for i in impacts]}

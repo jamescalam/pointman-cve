@@ -137,6 +137,7 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
             imp = opened(key, ids, a, [{"repo": got.name, "file": f, "package": n, "version": v, "ecosystem": e,
                                         "fixed_version": fixed_for(a, n, v)}
                                        for e, n, v in keys for f in got.where[(e, n, v)][:3]], by)
+            imp.log(by, "found at " + (f"{got.ref} ({got.commit[:8]})" if got.commit else "its files"))
             book.save(imp)
             records.append(imp)
             made.append(imp.advisory[0])
@@ -144,9 +145,10 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
         elif record.status == "fixed" and record.confirmed:
             was = record.confirmed
             record.status, record.fixed, record.confirmed = "affected", "", {}
-            record.notes.append(f"{now()[:10]}: reopened by {by}: "
-                                + ", ".join(f"{h['package']} {h['version']}" for h in rows)
-                                + f" is back (confirmed gone at {was.get('ref') or 'its files'} {str(was.get('commit'))[:8]})")
+            why = (", ".join(f"{h['package']} {h['version']}" for h in rows)
+                   + f" is back (confirmed gone at {was.get('ref') or 'its files'} {str(was.get('commit'))[:8]})")
+            record.notes.append(f"{now()[:10]}: reopened by {by}: {why}")
+            record.log(by, f"reopened: {why}", was="fixed")
             book.save(record)
             reopened += rows
         elif record.status == "fixed":
@@ -163,6 +165,7 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
                          r.severity, str(w.get("fixed_version") or "")) for w in mine]
         elif r.status == "fixed" and not r.confirmed and all(w.get("repo") == got.name for w in r.where):
             r.confirmed = {"by": by, "ref": got.ref, "commit": got.commit, "at": now()}   # only this repo has it
+            r.log(by, "confirmed: the version has gone at " + (f"{got.ref} ({got.commit[:8]})" if got.commit else "its files"))
             book.save(r)
             confirmed.append(r.advisory[0])
     return {"project": key, "repo": repo, "ref": got.ref, "commit": got.commit, "new": new, "reopened": reopened,
