@@ -139,6 +139,25 @@ class ExtensionTests(unittest.TestCase):
         self.assertIn('justification = ""', text)                                     # not not_affected now
         self.assertEqual(text.count("[[history]]"), 3)
 
+    def test_vex_posts_an_openvex_document_that_validates(self):
+        from test_core import vex_errors
+        self.run_command("cve.add", {"advisory": "CVE-2026-77", "project": "MB", "status": "affected",
+                                     "package": "rustls", "version": "0.23.45", "fixed_version": "0.23.46",
+                                     "repo": "pointman-ai/pointman"})
+        self.run_command("cve.add", {"advisory": "MAL-2026-2144", "project": "MB", "status": "not_affected",
+                                     "justification": "component_not_present", "note": "test fixture"})
+        done = self.node.run("cve.vex", {"project": "mb"})
+        self.assertEqual((done.result["statements"], done.result["counts"]), (2, {"affected": 1, "not_affected": 1}))
+        self.assertIn("OpenVEX for MB: 2 statements (1 affected, 1 not affected), posted as openvex-mb-", done.result["text"])
+        (out,) = done.outputs
+        self.assertEqual((out.kind, out.role, Path(out.path).name), ("document", types.OutputRequest.Role.ROLE_MAIN,
+                                                                     done.result["file"]))
+        doc = json.loads(Path(out.path).read_text())
+        self.assertEqual(vex_errors(doc), [])
+        self.assertEqual((doc["@id"], doc["tooling"][:13]), (done.result["id"], "pointman-cve "))
+        self.assertIn("which project?", self.refused("cve.vex", {}))
+        self.assertIn("nothing is recorded for PFE", self.refused("cve.vex", {"project": "PFE"}))
+
     def test_one_fix_records_several_advisories_at_once(self):
         got = self.run_command("cve.add", {"advisory": "RUSTSEC-2026-0367, RUSTSEC-2026-0368", "project": "MB",
                                            "package": "zip", "version": "8.6.0", "status": "affected"})

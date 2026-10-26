@@ -15,3 +15,4 @@ edge cases. Every line is copied as it was, apart from the one noted below.
 | `cvss3.tsv` | [GitHub's advisory database](https://github.com/advisories) API, the 100 newest reviewed advisories on 26 Oct 2026 | the 66 with a CVSS 3 vector: each vector and the score GitHub gives it (CC-BY 4.0) |
 | `github/GHSA-xmj3-9gf7-h52w.json` | [GitHub's advisory API](https://api.github.com/advisories/GHSA-xmj3-9gf7-h52w), 26 Oct 2026 | as answered: an advisory with only a CVSS 4.0 vector, scored by GitHub (CC-BY 4.0) |
 | `osv/GHSA-xjj6-f33q-929c.json`, `osv/RUSTSEC-2026-0386.json` | [OSV.dev](https://osv.dev)'s API, 26 Oct 2026 | as answered: undici's advisory with a range for each release line, and tokio's with two (CC-BY 4.0 and CC0) |
+| `openvex_json_schema.json` | [openvex/spec@61b5f885d0f4](https://github.com/openvex/spec/blob/61b5f885d0f481f48683c93345e49ef1a6e9fdff/openvex_json_schema.json) | OpenVEX 0.2.0's JSON Schema as published (CC0) |

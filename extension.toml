@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.9.0"
+version = "0.10.0"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"
@@ -80,6 +80,14 @@ title = "Update a record (fixed needs a PR, commit or release)"
 params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string", description = "One, or several comma-separated." }, project = { type = "string" }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"], description = "fixed needs pr, commit or fixed_in; the next scan confirms it" }, pr = { type = "string", description = "PR or commit links to add, comma-separated." }, commit = { type = "string", description = "Commit links that fixed it, comma-separated." }, thread = { type = "string", description = "Threads to add." }, task = { type = "string", description = "Task refs to add." }, fixed_in = { type = "string", description = "The release or version that fixed it." }, note = { type = "string", description = "Why: kept in its history; not_affected needs one." }, by = { type = "string", description = "Who's making the change: your handle (@you) or the person's. Kept in its history." }, justification = { type = "string", enum = ["component_not_present", "vulnerable_code_not_present", "vulnerable_code_not_in_execute_path", "vulnerable_code_cannot_be_controlled_by_adversary", "inline_mitigations_already_exist"] }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"] }, title = { type = "string" }, package = { type = "string" }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string" }, repo = { type = "string" } } }
 slash = "set"
 summary = "Update an impact: /cve set CVE-2026-1234 MB fixed pr=https://github.com/…"
+
+[[commands]]
+kind = "cve.vex"
+title = "OpenVEX export of a project's records"
+params = { type = "object", required = ["project"], properties = { project = { type = "string", description = "A project's key: MB." }, author = { type = "string", description = "Who the document names as its author; pointman-cve if left out." } } }
+outputs = ["document"]
+slash = "vex"
+summary = "A project's records as an OpenVEX document, posted as a file: /cve vex MB"
 
 [[commands]]
 kind = "cve.show"

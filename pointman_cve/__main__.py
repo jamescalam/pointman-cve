@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import Counter
+from pathlib import Path
 
 from pointman_extension import Extension, Refused, Retry
 from pointman_extension_types import Block, Chart, Empty, Layout, PaneContent, PaneOpenResponse, Text, Tone
 
-from . import lockfiles, repos, scans
+from . import lockfiles, repos, scans, vex
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
 from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, slug, thread_link
 from .store import Book, store_for
@@ -261,7 +263,7 @@ def caller(job) -> tuple[str, bool]:
     return str(job.params.get("by") or "").strip(), True
 
 
-def vex(p: dict) -> None:
+def says_why(p: dict) -> None:
     """not_affected says why, as VEX does: one of its justifications, and a note in our words."""
     if str(p.get("status") or "") != "not_affected":
         return
@@ -293,7 +295,7 @@ def add(job):
     if not advisories or not project:
         raise Refused("/cve add <advisory> <project>: CVE-2026-1234 MB")
     evidence(p)
-    vex(p)
+    says_why(p)
     who, said = caller(job)
     p = {**p, "by": who, "_said": said}
     b = book()
@@ -347,7 +349,7 @@ def set_(job):
     if len(advisories) == 1 and loaded[0][1] is None:
         raise Refused(f"{advisories[0]} isn't recorded for {project}: add it with /cve add {advisories[0]} {project}")
     evidence(p)                      # before anything is written: one without its evidence or its why changes none
-    vex(p)
+    says_why(p)
     who, said = caller(job)
     changed, missing = [], []
     for advisory, imp in loaded:
@@ -425,6 +427,26 @@ def confirmation(i: Impact) -> str:
                    + f" on {str(c.get('at'))[:10]}" for repo, c in sorted(i.confirmed.items()))
     left = sorted(i.repos - set(i.confirmed))
     return f", confirmed in {at}" + (f"; not yet in {', '.join(left)}" if left else "")
+
+
+@ext.command("cve.vex")
+def vex_cmd(job):
+    """A project's records as an OpenVEX document, posted as a file with the answer."""
+    project = str(job.params.get("project") or "").strip().upper()
+    if not project:
+        raise Refused("which project? /cve vex <key>: MB")
+    records = book().all(project)
+    if not records:
+        raise Refused(f"nothing is recorded for {project}, so there's nothing to say yet")
+    tool = f"pointman-cve {ext.manifest.get('extension', {}).get('version', '')}".strip()
+    doc = vex.document(project, records, str(job.params.get("author") or "").strip() or "pointman-cve", tool, now())
+    path = Path(job.work) / f"openvex-{project.lower()}-{now()[:10]}.json"
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    job.output(path, kind="document", meta={"title": f"OpenVEX: {project}", "file": path.stem})
+    counts = Counter(s["status"] for s in doc["statements"])
+    said = ", ".join(f"{n} {status.replace('_', ' ')}" for status, n in sorted(counts.items()))
+    return {"text": f"OpenVEX for {project}: {len(doc['statements'])} statements ({said}), posted as {path.name}.",
+            "file": path.name, "id": doc["@id"], "statements": len(doc["statements"]), "counts": dict(counts)}
 
 
 @ext.command("cve.show")

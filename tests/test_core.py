@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 
 from gitrepo import Repo, git
-from pointman_cve import cvss, feeds, lockfiles, repos, scans, versions
+import schema
+from pointman_cve import cvss, feeds, lockfiles, repos, scans, versions, vex
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
 from pointman_cve.store import Book, DirStore, path_ok
@@ -53,11 +54,11 @@ class ImpactTests(unittest.TestCase):
                          ("@cvescan", "investigating", "not_affected", "vulnerable_code_not_in_execute_path",
                           ["https://github.com/x/y/pull/1"]))
         self.assertNotIn("by", second)                      # only what the caller said, marked as such
-        for old, vex in [("not_present", "component_not_present"), ("not_reachable", "vulnerable_code_not_in_execute_path"),
+        for old, named in [("not_present", "component_not_present"), ("not_reachable", "vulnerable_code_not_in_execute_path"),
                          ("inline_mitigations", "inline_mitigations_already_exist"),
                          ("protected", "vulnerable_code_cannot_be_controlled_by_adversary")]:
             text = imp.to_toml().replace('justification = "vulnerable_code_not_in_execute_path"\n', f'justification = "{old}"\n', 1)
-            self.assertEqual(Impact.from_toml(text).justification, vex, old)       # records from before 0.8.0
+            self.assertEqual(Impact.from_toml(text).justification, named, old)     # records from before 0.8.0
             Impact.from_toml(text).check()
 
     def test_paths_from_advisory_ids(self):
@@ -733,6 +734,81 @@ class PlanTests(unittest.TestCase):
             "- npm undici 7.30.0 → 7.31.0: fixes 2 (2 not)",
             "- rust tokio 1.53.2 → 1.53.3: fixes 1",
             "No fix named yet for 2: GHSA-back, GHSA-none."])
+
+
+OPENVEX = json.loads((FIXTURES / "openvex_json_schema.json").read_text())
+
+
+def vex_errors(doc: dict) -> list[str]:
+    """OpenVEX's own schema (tests/fixtures/SOURCES.md), checked here and, where it's installed, by jsonschema."""
+    found = schema.errors(doc, OPENVEX)
+    try:
+        import jsonschema
+    except ImportError:
+        return found
+    theirs = [e.message for e in jsonschema.Draft202012Validator(OPENVEX).iter_errors(doc)]
+    assert bool(found) == bool(theirs), (found, theirs)
+    return found
+
+
+class VexTests(unittest.TestCase):
+    def records(self) -> list[Impact]:
+        affected = Impact(advisory=["CVE-2026-1", "GHSA-aaaa-bbbb-cccc", "RUSTSEC-2026-1"], project="EXT", status="affected",
+                          where=[{"repo": "pointman-ai/pointman-github", "package": "rustls", "version": "0.23.45",
+                                  "ecosystem": "rust", "fixed_version": "0.23.46"},
+                                 {"repo": "pointman-ai/pointman-linear", "package": "rustls", "version": "0.23.45",
+                                  "ecosystem": "rust", "fixed_version": "0.23.46"}])
+        fixture = Impact(advisory=["MAL-2026-2144"], project="EXT", status="not_affected",
+                         justification="component_not_present",
+                         where=[{"repo": "jamescalam/pointman-cve", "package": "litellm", "version": "1.107.0",
+                                 "ecosystem": "pip"}])
+        fixture.log("@cvescan", "test fixture", said=True)
+        open_ = Impact(advisory=["CVE-2026-3"], project="EXT", where=[{"repo": "~/Documents/tools", "package": "@scope/pkg",
+                                                                     "version": "1.0.0+build.1", "ecosystem": "npm"}])
+        fixed = Impact(advisory=["CVE-2026-4"], project="EXT", status="fixed", prs=["https://github.com/x/y/pull/9"],
+                       fixed_in="release 0.8.1")
+        fixed.log("@patchbay", "rustls 0.23.46", ["https://github.com/x/y/pull/9"], was="affected", said=True)
+        unfixed = Impact(advisory=["CVE-2026-5"], project="EXT", status="affected")
+        return [affected, fixture, open_, fixed, unfixed]
+
+    def test_packages_as_purls(self):
+        for args, want in [(("rust", "rustls", "0.23.45"), "pkg:cargo/rustls@0.23.45"),
+                           (("npm", "@scope/pkg", "1.0.0+build.1"), "pkg:npm/%40scope/pkg@1.0.0%2Bbuild.1"),
+                           (("pip", "PyYAML", "6.0.3"), "pkg:pypi/pyyaml@6.0.3"), (("pip", "zope.interface", "6"), "pkg:pypi/zope-interface@6"),
+                           (("go", "golang.org/x/net", "v0.17.0"), "pkg:golang/golang.org/x/net@v0.17.0"),
+                           (("rubygems", "ffi", "1.17.1"), "pkg:gem/ffi@1.17.1"),
+                           (("composer", "symfony/http-kernel", "v4.4.0"), "pkg:composer/symfony/http-kernel@v4.4.0"),
+                           (("actions", "actions/checkout", "v4"), "pkg:github/actions/checkout@v4")]:
+            self.assertEqual(vex.purl(*args), want)
+
+    def test_a_project_s_records_as_an_openvex_document_that_validates(self):
+        doc = vex.document("EXT", self.records(), "pointman-cve", "pointman-cve 0.10.0", "2026-10-27T00:00:00Z")
+        self.assertEqual(vex_errors(doc), [])
+        self.assertEqual((doc["@context"], doc["version"], len(doc["statements"])), ("https://openvex.dev/ns/v0.2.0", 1, 5))
+        by = {s["vulnerability"]["name"]: s for s in doc["statements"]}
+        self.assertEqual(by["CVE-2026-1"]["vulnerability"]["aliases"], ["GHSA-aaaa-bbbb-cccc", "RUSTSEC-2026-1"])
+        self.assertEqual([(p["@id"], [c["@id"] for c in p["subcomponents"]]) for p in by["CVE-2026-1"]["products"]],
+                         [("pkg:github/pointman-ai/pointman-github", ["pkg:cargo/rustls@0.23.45"]),
+                          ("pkg:github/pointman-ai/pointman-linear", ["pkg:cargo/rustls@0.23.45"])])
+        self.assertEqual(by["CVE-2026-1"]["action_statement"], "Upgrade rustls 0.23.45 to 0.23.46.")
+        self.assertEqual({k: by["MAL-2026-2144"][k] for k in ("status", "justification", "impact_statement")},
+                         {"status": "not_affected", "justification": "component_not_present", "impact_statement": "test fixture"})
+        self.assertEqual((by["CVE-2026-3"]["status"], by["CVE-2026-3"]["products"][0]["@id"]),
+                         ("under_investigation", "urn:pointman:cve:ext:Documents/tools"))
+        self.assertEqual(by["CVE-2026-4"]["status_notes"], "rustls 0.23.46; https://github.com/x/y/pull/9, fixed in release 0.8.1")
+        self.assertEqual((by["CVE-2026-5"]["products"], by["CVE-2026-5"]["action_statement"]),
+                         ([{"@id": "urn:pointman:cve:ext"}], "No fixed version is named yet: the record stays open."))
+        again = vex.document("EXT", self.records(), "pointman-cve", "pointman-cve 0.10.0", "2026-10-28T00:00:00Z")
+        self.assertEqual(again["@id"], doc["@id"])                    # the same records say the same thing
+
+    def test_the_check_isn_t_vacuous(self):
+        doc = vex.document("EXT", self.records(), "pointman-cve", "x", "2026-10-27T00:00:00Z")
+        affected = next(s for s in doc["statements"] if s["status"] == "affected")
+        del affected["action_statement"]                              # VEX: affected says what to do
+        self.assertNotEqual(vex_errors(doc), [])
+        doc = vex.document("EXT", self.records(), "pointman-cve", "x", "2026-10-27T00:00:00Z")
+        doc["statements"][0]["status"] = "investigating"              # ours, not VEX's
+        self.assertNotEqual(vex_errors(doc), [])
 
 
 class ManifestTests(unittest.TestCase):
