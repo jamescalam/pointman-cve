@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.6.0"
+version = "0.7.0"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"
@@ -45,7 +45,7 @@ summary = "Advisories published lately, newest first: /cve recent rust 14"
 [[commands]]
 kind = "cve.scan"
 title = "Scan projects at their git refs for advisories"
-lane = "scan"
+lane = "records"                  # what writes records runs one at a time on a node
 params = { type = "object", properties = { project = { type = "string", description = "A project's key in the projects setting; left out, every one." } } }
 slash = "scan"
 summary = "Scan the projects setting's repos at their refs: what's new, reopened, gone and open: /cve scan MB"
@@ -59,6 +59,7 @@ summary = "The fewest upgrades that fix the most: a line a package, from, to and
 
 [[commands]]
 kind = "cve.check"
+lane = "records"
 title = "Check one folder's lockfiles against advisories"
 params = { type = "object", properties = { folder = { type = "string", description = "The folder, read as it is on disk." }, project = { type = "string", description = "A project's key: opens an impact there for each advisory found." } } }
 slash = "check"
@@ -66,15 +67,17 @@ summary = "Which advisories hit the versions a folder's lockfiles pin: /cve chec
 
 [[commands]]
 kind = "cve.add"
+lane = "records"
 title = "Record an advisory that touched a project"
-params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string", description = "CVE-…, GHSA-…, or a short name for one without an id; several that one fix covers, comma-separated." }, project = { type = "string", description = "The project's key: MB." }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"] }, fixed_in = { type = "string", description = "The release or version that fixed it." }, note = { type = "string" }, justification = { type = "string", enum = ["not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected"], description = "Why it's not_affected." }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"], description = "Ours, beside the published one." }, title = { type = "string" }, package = { type = "string", description = "Where it hit: the package." }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string", description = "The lockfile." }, repo = { type = "string", description = "owner/repo." }, pr = { type = "string", description = "PR or commit links, comma-separated." }, thread = { type = "string", description = "Pointman threads, comma-separated." }, task = { type = "string", description = "Task refs, comma-separated: MB-588." }, by = { type = "string", description = "Who found it." } } }
+params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string", description = "CVE-…, GHSA-…, or a short name for one without an id; several that one fix covers, comma-separated." }, project = { type = "string", description = "The project's key: MB." }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"], description = "fixed needs pr, commit or fixed_in; the next scan confirms it" }, fixed_in = { type = "string", description = "The release or version that fixed it." }, note = { type = "string" }, justification = { type = "string", enum = ["not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected"], description = "Why it's not_affected." }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"], description = "Ours, beside the published one." }, title = { type = "string" }, package = { type = "string", description = "Where it hit: the package." }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string", description = "The lockfile." }, repo = { type = "string", description = "owner/repo." }, pr = { type = "string", description = "PR or commit links, comma-separated." }, commit = { type = "string", description = "Commit links that fixed it, comma-separated." }, thread = { type = "string", description = "Pointman threads, comma-separated." }, task = { type = "string", description = "Task refs, comma-separated: MB-588." }, by = { type = "string", description = "Who found it." } } }
 slash = "add"
 summary = "Record an advisory that touched a project: /cve add CVE-2026-1234 MB"
 
 [[commands]]
 kind = "cve.set"
-title = "Update a recorded impact"
-params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string", description = "One, or several comma-separated." }, project = { type = "string" }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"] }, pr = { type = "string", description = "PR or commit links to add, comma-separated." }, thread = { type = "string", description = "Threads to add." }, task = { type = "string", description = "Task refs to add." }, fixed_in = { type = "string", description = "The release or version that fixed it." }, note = { type = "string" }, justification = { type = "string", enum = ["not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected"] }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"] }, title = { type = "string" }, package = { type = "string" }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string" }, repo = { type = "string" } } }
+lane = "records"
+title = "Update a record (fixed needs a PR, commit or release)"
+params = { type = "object", required = ["advisory", "project"], properties = { advisory = { type = "string", description = "One, or several comma-separated." }, project = { type = "string" }, status = { type = "string", enum = ["investigating", "affected", "not_affected", "fixed"], description = "fixed needs pr, commit or fixed_in; the next scan confirms it" }, pr = { type = "string", description = "PR or commit links to add, comma-separated." }, commit = { type = "string", description = "Commit links that fixed it, comma-separated." }, thread = { type = "string", description = "Threads to add." }, task = { type = "string", description = "Task refs to add." }, fixed_in = { type = "string", description = "The release or version that fixed it." }, note = { type = "string" }, justification = { type = "string", enum = ["not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected"] }, severity = { type = "string", enum = ["critical", "high", "medium", "low", "unknown"] }, title = { type = "string" }, package = { type = "string" }, version = { type = "string" }, fixed_version = { type = "string" }, file = { type = "string" }, repo = { type = "string" } } }
 slash = "set"
 summary = "Update an impact: /cve set CVE-2026-1234 MB fixed pr=https://github.com/…"
 

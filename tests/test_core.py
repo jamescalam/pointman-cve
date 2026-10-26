@@ -27,10 +27,14 @@ class ImpactTests(unittest.TestCase):
 
     def test_a_record_round_trips_through_its_file(self):
         imp = self.emudhra()
+        imp.confirmed = {"pointman-ai/pointman": {"by": "cve scan on mac-m4 at origin/main (7f5769fa)",
+                                                  "ref": "origin/main", "commit": "7f5769fa", "at": "2026-10-23T09:00:00Z"}}
         imp.check()
         text = imp.to_toml()
         self.assertIn('status = "fixed"', text)
         self.assertIn("[[where]]", text)
+        self.assertIn('[confirmed."pointman-ai/pointman"]\nby = "cve scan on mac-m4 at origin/main (7f5769fa)"', text)
+        self.assertTrue(imp.confirmed_everywhere)                    # its one repo: pointman-ai/pointman
         self.assertEqual(Impact.from_toml(text), imp)
         self.assertEqual(imp.path, "impacts/mb/emudhra-g3-distrust.toml")
 
@@ -474,15 +478,59 @@ class ScanTests(unittest.TestCase):
         self.assertNotIn(("crates.io", "rustls-webpki", "0.103.99"), self.osv.asked)     # the working tree's
         self.assertNotIn("litellm", {n for _, n, _ in self.osv.asked})
 
-    def test_a_fixed_record_hit_again_is_reopened(self):
+    def test_scans_check_a_fixed_record_still_there_then_confirmed_then_reopened(self):
+        """Agents mark records; scans check them."""
         self.scan("v1")
         imp = self.book.load("MB", "CVE-2026-9999")
-        imp.status = "fixed"
+        imp.status, imp.prs = "fixed", ["https://github.com/x/app/pull/7"]
         self.book.save(imp)
-        got = self.scan("v1")
-        self.assertEqual((got["new"], got["gone"], got["open"]), ([], [], 0))
+        path = "impacts/mb/cve-2026-9999.toml"
+        versions_now = lambda: len(self.book.store._versions(path))               # noqa: E731
+
+        got = self.scan("v1")                                  # the fix isn't at v1: still there, left as it is
+        self.assertEqual((got["new"], got["reopened"], got["confirmed"], got["open"]), ([], [], [], 0))
+        self.assertEqual([(h["advisory"], h["version"]) for h in got["still"]], [("CVE-2026-9999", "0.103.15")])
+        self.assertEqual((self.book.load("MB", "CVE-2026-9999").status, versions_now()), ("fixed", 2))
+
+        got = self.scan("origin/main")                         # gone at main: confirmed, with the scan's ref
+        self.assertEqual((got["confirmed"], got["gone"], got["still"]), (["CVE-2026-9999"], [], []))
+        c = self.book.load("MB", "CVE-2026-9999").confirmed["app/origin"]
+        self.assertEqual((c["by"], c["ref"], c["commit"]), ("a test", "origin/main", self.repo.v2))
+        self.assertTrue(c["at"].startswith("20"))
+        self.assertEqual(self.scan("origin/main")["confirmed"], [])                # once: no new version
+        self.assertEqual(versions_now(), 3)
+
+        got = self.scan("v1")                                  # back: reopened as affected, with a note
         self.assertEqual([(h["advisory"], h["version"]) for h in got["reopened"]], [("CVE-2026-9999", "0.103.15")])
-        self.assertEqual(self.scan("origin/main")["gone"], [])        # a fixed record isn't open: not gone either
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual((imp.status, imp.confirmed, imp.fixed, got["open"]), ("affected", {}, "", 1))
+        self.assertIn("reopened by a test: rustls-webpki 0.103.15 is back (confirmed gone at origin/main", imp.notes[-1])
+        self.assertEqual(imp.prs, ["https://github.com/x/app/pull/7"])           # the evidence stays, as history
+
+    def test_a_record_found_in_two_repos_is_confirmed_repo_by_repo(self):
+        other = Repo(self.dir / "web")                          # another repo of the same project, pinning the same
+        def scan(repo, ref):
+            p = repos.Project("MB", str(repo.checkout), ref)
+            got = repos.read(p, repo.checkout)
+            return scans.scan("MB", p.repo, got, scans.advisories(self.feeds, got.where), self.book, f"a test of {ref}")
+        self.assertEqual(len(scan(self.repo, "v1")["new"]), 1)
+        self.assertEqual(scan(other, "v1")["new"], [])           # the same advisory: the same record, both places
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual(imp.repos, {"app/origin", "web/origin"})
+        imp.status, imp.prs = "fixed", ["https://github.com/x/app/pull/7"]
+        self.book.save(imp)
+
+        self.assertEqual(scan(self.repo, "origin/main")["confirmed"], ["CVE-2026-9999"])   # gone in one of two
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual((set(imp.confirmed), imp.confirmed_everywhere, imp.status), ({"app/origin"}, False, "fixed"))
+        self.assertEqual(len(scan(other, "v1")["still"]), 1)                                # still there in the other
+        self.assertEqual(scan(other, "origin/main")["confirmed"], ["CVE-2026-9999"])        # and now gone there too
+        self.assertTrue(self.book.load("MB", "CVE-2026-9999").confirmed_everywhere)
+
+        back = scan(self.repo, "v1")                                                       # back in the first
+        self.assertEqual(len(back["reopened"]), 1)
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual((imp.status, imp.confirmed), ("affected", {}))
 
     def test_a_record_kept_under_another_id_isn_t_new(self):
         self.book.save(Impact(advisory=["GHSA-xxxx-yyyy-zzzz"], project="MB", status="affected"))
@@ -505,7 +553,7 @@ class ScanTests(unittest.TestCase):
                "error": "origin/nope isn't a branch, tag or commit in ~/Documents/pfe"}
         found = [self.scan("v1"), bad]
         all_ = scans.totals(found)
-        self.assertEqual(all_, {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 1})
+        self.assertEqual(all_, {"new": 1, "reopened": 0, "gone": 0, "still": 0, "confirmed": 0, "open": 1, "failed": 1})
         text = scans.text(found, all_)
         self.assertEqual(text.splitlines()[0], "Scanned MB, PFE: 1 new, 0 reopened, 0 gone, 1 open, 1 failed.")
         self.assertIn("\n**PFE** couldn't be scanned: origin/nope isn't a branch, tag or commit in ~/Documents/pfe.",

@@ -176,7 +176,7 @@ def scan_project(p: repos.Project, b: Book) -> dict:
     done = scans.scan(p.key, p.repo, got, found, b, by)
     b.store.put(last_scan(p.key, p.repo), json.dumps({
         "project": p.key, "repo": p.repo, "ref": got.ref, "commit": got.commit, "scanned": now(), "open": done["open"],
-        **{k: len(done[k]) for k in ("new", "reopened", "gone")}, "plan": done["plan"]}, indent=1))
+        **{k: len(done[k]) for k in ("new", "reopened", "gone", "still", "confirmed")}, "plan": done["plan"]}, indent=1))
     return done
 
 
@@ -241,8 +241,15 @@ def scan(job):
     ext.event("cve.scanned", {"scanned": now(), **all_, "projects": [
         {"project": f["project"], "ref": f["ref"], "error": f["error"]} if "error" in f else
         {"project": f["project"], "ref": f["ref"], "commit": f["commit"],
-         **{k: len(f[k]) for k in ("new", "reopened", "gone")}, "open": f["open"]} for f in found]})
+         **{k: len(f[k]) for k in ("new", "reopened", "gone", "still", "confirmed")}, "open": f["open"]} for f in found]})
     return {"projects": found, **all_, "text": text}
+
+
+def evidence(p: dict) -> None:
+    """Marking a record fixed takes its evidence: a PR, a commit or the release that fixed it. A scan then checks it."""
+    if str(p.get("status") or "") == "fixed" and not (split(p.get("pr")) or split(p.get("commit")) or p.get("fixed_in")):
+        raise Refused("fixed needs its evidence: pr=<link>, commit=<link> or fixed_in=<release>. The next scan "
+                      "confirms it once the version has gone, or says it's still there")
 
 
 @ext.command("cve.add")
@@ -252,6 +259,7 @@ def add(job):
     advisories, project = split(p.get("advisory")), str(p.get("project") or "").strip().upper()
     if not advisories or not project:
         raise Refused("/cve add <advisory> <project>: CVE-2026-1234 MB")
+    evidence(p)
     b = book()
     if len(advisories) == 1:
         if b.load(project, advisories[0]):
@@ -298,12 +306,13 @@ def set_(job):
     if not advisories:
         raise Refused("/cve set <advisory> <project> status=…: CVE-2026-1234 MB")
     b = book()
+    loaded = [(advisory, b.load(project, advisory)) for advisory in advisories]
+    if len(advisories) == 1 and loaded[0][1] is None:
+        raise Refused(f"{advisories[0]} isn't recorded for {project}: add it with /cve add {advisories[0]} {project}")
+    evidence(p)                      # before anything is written: one without its evidence changes none
     changed, missing = [], []
-    for advisory in advisories:
-        imp = b.load(project, advisory)
+    for advisory, imp in loaded:
         if imp is None:
-            if len(advisories) == 1:
-                raise Refused(f"{advisory} isn't recorded for {project}: add it with /cve add {advisory} {project}")
             missing.append(advisory)
             continue
         for key in ("status", "justification", "severity", "title"):
@@ -322,8 +331,9 @@ def set_(job):
 
 
 def apply(imp: Impact, p: dict) -> None:
-    """Links and notes add to what's there; fixed_in, and the time it was fixed."""
-    for key, attr in (("pr", "prs"), ("task", "tasks")):
+    """Links and notes add to what's there; fixed_in, and the time it was fixed. A commit is kept with the PRs, as
+    its link. A record that isn't fixed any more loses its fixed time and its confirmation."""
+    for key, attr in (("pr", "prs"), ("commit", "prs"), ("task", "tasks")):
         for v in split(p.get(key)):
             if v not in getattr(imp, attr):
                 getattr(imp, attr).append(v)
@@ -335,6 +345,8 @@ def apply(imp: Impact, p: dict) -> None:
         imp.fixed_in = str(p["fixed_in"])
     if imp.status == "fixed" and not imp.fixed:
         imp.fixed = now()
+    if imp.status != "fixed":
+        imp.fixed, imp.confirmed = "", {}
     if p.get("note"):
         imp.notes.append(f"{now()[:10]}: {str(p['note']).strip()}")
     if p.get("package"):
@@ -343,6 +355,18 @@ def apply(imp: Impact, p: dict) -> None:
              "repo": str(p.get("repo") or "")}
         if w not in imp.where:
             imp.where.append(w)
+
+
+def confirmation(i: Impact) -> str:
+    """Whether scans have checked a fixed record: confirmed at each repo's ref, in some of its repos, or not yet."""
+    if i.status != "fixed":
+        return ""
+    if not i.confirmed:
+        return ", not confirmed by a scan yet"
+    at = "; ".join(f"{repo} at {c.get('ref') or 'its files'}" + (f" ({str(c.get('commit'))[:8]})" if c.get("commit") else "")
+                   + f" on {str(c.get('at'))[:10]}" for repo, c in sorted(i.confirmed.items()))
+    left = sorted(i.repos - set(i.confirmed))
+    return f", confirmed in {at}" + (f"; not yet in {', '.join(left)}" if left else "")
 
 
 @ext.command("cve.show")
@@ -362,7 +386,7 @@ def show(job):
         impacts, kept = [], f"\n\nOur records aren't readable here: {e}."
     head = one_line(a) if a else f"{advisory}: {why}."
     ours = "\n".join(f"- {i.project}: {i.status}" + (f" ({i.justification})" if i.justification else "")
-                     + (f", fixed in {i.fixed_in}" if i.fixed_in else "")
+                     + (f", fixed in {i.fixed_in}" if i.fixed_in else "") + confirmation(i)
                      + (f" · PRs: {', '.join(i.prs)}" if i.prs else "") for i in impacts)
     return {"text": head + (kept or ("\n\nOur record:\n" + ours if ours else "\n\nNot recorded for any project.")),
             "impacts": [i.path for i in impacts]}
@@ -379,7 +403,7 @@ def impacts_cmd(job):
         return {"text": "No impacts recorded" + (f" for {project}" if project else "") + "."}
     ordered, signals, why = scans.fix_first(found, feeds)     # open ones first, fix-first; then newest first
     lines = [f"- **{i.advisory[0]}** {i.project}: {i.status}" + scans.flags(*signals.get(i.path, (None, None)))
-             + (f", fixed in {i.fixed_in}" if i.fixed_in else "") for i in ordered[:LISTED]]
+             + (f", fixed in {i.fixed_in}" if i.fixed_in else "") + confirmation(i) for i in ordered[:LISTED]]
     note = f"Known-exploited and EPSS couldn't be had ({why}): open ones are in severity order.\n" if why else ""
     more = f"\n…and {len(found) - LISTED} more in the pane." if len(found) > LISTED else ""
     credit = f"\n{scans.EPSS_CREDIT}" if any(e is not None for _, e in signals.values()) else ""
