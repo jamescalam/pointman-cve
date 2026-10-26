@@ -22,7 +22,7 @@ advisory = ["emudhra-g3-distrust"]
 title = "eMudhra G3 intermediates computable"
 project = "MB"
 status = "fixed"              # investigating | affected | not_affected | fixed
-justification = ""            # why it's not_affected: not_present, not_reachable, not_in_execute_path, …
+justification = ""            # VEX's, for not_affected: vulnerable_code_not_in_execute_path, …
 severity = "medium"           # yours, beside the published one
 fixed_in = "release 32"
 prs = ["https://github.com/pointman-ai/pointman/commit/7f5769fa"]
@@ -41,9 +41,21 @@ file = "node/Cargo.lock"
 package = "rustls-webpki"
 version = "0.103.15"
 fixed_version = "0.103.16"
+
+[[history]]                   # one for each change, oldest first
+at = "2026-10-22T10:02:11Z"
+by_said = "@patchbay"         # who, as the caller said it (by = "…" once the node says who asked)
+status = "fixed"
+was = "affected"
+why = "rustls-webpki 0.103.16 denylists them"
+evidence = ["https://github.com/pointman-ai/pointman/commit/7f5769fa", "fixed in release 32"]
 ```
 
 The statuses are VEX's (Vulnerability Exploitability eXchange), so the records can be turned into a standard report later.
+
+**Not affected says why, as VEX does.** `not_affected` takes one of VEX's justifications (`component_not_present`, `vulnerable_code_not_present`, `vulnerable_code_not_in_execute_path`, `vulnerable_code_cannot_be_controlled_by_adversary`, `inline_mitigations_already_exist`) and a `note` in your words, and is refused without both. Records written before 0.8.0 with the older short names are read as VEX's.
+
+**Every change is kept.** Each `/cve add` and `/cve set`, and each record a scan opens, confirms or reopens, adds a `[[history]]` entry: when, who, the status it left and took, why, and its evidence. `/cve show` lists it. A command isn't told who asked yet, so for now "who" is the `by` its caller gives, kept as `by_said` and shown as "(said)". Once the node passes the asker, that's kept as `by` and `by` params are ignored. A scan's own changes are kept as `by`, naming the scan, its machine and its ref.
 
 **Agents mark records; scans check them.** Marking a record `fixed` needs its evidence: `pr`, `commit` or `fixed_in` (`/cve set CVE-2026-1234 MB fixed pr=https://github.com/…`); without one, it's refused. Each scan then checks the fixed records it has a repo for:
 

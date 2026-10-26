@@ -2,7 +2,8 @@
 own files in the workspace (`impacts/<PROJECT>/<ADVISORY>.toml`), so every machine and app sees the same
 record, and every change is a new version of it.
 
-A status is one of VEX's: investigating, affected, not_affected (with a justification) or fixed.
+A status is one of VEX's: investigating, affected, not_affected (with one of VEX's justifications) or fixed. Every
+change keeps a line of its history: when, by whom, the status it left and took, why, and its evidence.
 """
 
 from __future__ import annotations
@@ -13,7 +14,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 STATUSES = ("investigating", "affected", "not_affected", "fixed")
-JUSTIFICATIONS = ("not_present", "not_reachable", "not_in_execute_path", "inline_mitigations", "protected")
+JUSTIFICATIONS = ("component_not_present", "vulnerable_code_not_present", "vulnerable_code_not_in_execute_path",
+                  "vulnerable_code_cannot_be_controlled_by_adversary", "inline_mitigations_already_exist")   # VEX's
+WAS = {"not_present": "component_not_present", "not_reachable": "vulnerable_code_not_in_execute_path",
+       "not_in_execute_path": "vulnerable_code_not_in_execute_path", "inline_mitigations": "inline_mitigations_already_exist",
+       "protected": "vulnerable_code_cannot_be_controlled_by_adversary"}    # before 0.8.0: read as VEX's names
 SEVERITIES = ("critical", "high", "medium", "low", "unknown")
 PROJECT = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,15}$")
 
@@ -53,6 +58,21 @@ class Impact:
     notes: list[str] = field(default_factory=list)
     where: list[dict] = field(default_factory=list)   # {repo, file, package, version, fixed_version}
     confirmed: dict = field(default_factory=dict)     # fixed, and gone at a repo's ref: {repo: {by, ref, commit, at}}
+    history: list[dict] = field(default_factory=list)  # each change: {at, by or by_said, status, was, why, evidence, …}
+
+    def log(self, by: str, why: str = "", evidence: list[str] | None = None, was: str = "", said: bool = False) -> None:
+        """A line of history for a change just made: when, who, the status taken (and the one left), why, evidence.
+        `said`: who it was is only what the caller said (`by_said`), not what the node knows (`by`)."""
+        entry = {"at": now(), "by_said" if said else "by": by, "status": self.status}
+        if was and was != self.status:
+            entry["was"] = was
+        if self.status == "not_affected" and self.justification:
+            entry["justification"] = self.justification
+        if why:
+            entry["why"] = why
+        if evidence:
+            entry["evidence"] = list(evidence)
+        self.history.append(entry)
 
     @property
     def repos(self) -> set[str]:
@@ -97,6 +117,8 @@ class Impact:
             lines += ["", f"[confirmed.{value(repo)}]"] + [f"{k} = {value(v)}" for k, v in c.items() if v not in (None, "")]
         for w in self.where:
             lines += ["", "[[where]]"] + [f"{k} = {value(v)}" for k, v in w.items() if v not in (None, "")]
+        for h in self.history:
+            lines += ["", "[[history]]"] + [f"{k} = {value(v)}" for k, v in h.items() if v not in (None, "", [])]
         return "\n".join(lines) + "\n"
 
     @classmethod
@@ -106,6 +128,8 @@ class Impact:
         kept = {k: v for k, v in d.items() if k in names}
         if isinstance(kept.get("advisory"), str):
             kept["advisory"] = [kept["advisory"]]
+        if kept.get("justification") in WAS:
+            kept["justification"] = WAS[kept["justification"]]
         return cls(**kept)
 
 

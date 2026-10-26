@@ -114,6 +114,31 @@ class ExtensionTests(unittest.TestCase):
         self.assertIn("offline", got["text"])                  # the feed wasn't asked
         self.assertIn("- MB: fixed, fixed in release 35", got["text"])
 
+    def test_not_affected_says_why_as_vex_does_and_every_change_is_kept(self):
+        self.run_command("cve.add", {"advisory": "CVE-2026-77", "project": "MB", "by": "@scanner-agent",
+                                     "note": "zstd-safe 7.3.0 in node/Cargo.lock"})
+        for params, says in [({}, "not_affected needs VEX's justification"),
+                             ({"justification": "not_reachable"}, "(not not_reachable)"),
+                             ({"justification": "vulnerable_code_not_in_execute_path"}, "needs a note saying why")]:
+            self.assertIn(says, self.refused("cve.set", {"advisory": "CVE-2026-77", "project": "MB",
+                                                         "status": "not_affected", **params}))
+        self.assertEqual(len(self.files.versions["impacts/mb/cve-2026-77.toml"]), 1)    # nothing written
+        self.run_command("cve.set", {"advisory": "CVE-2026-77", "project": "MB", "status": "not_affected",
+                                     "justification": "vulnerable_code_not_in_execute_path", "by": "@cvescan",
+                                     "note": "the vault only uses the plain stream encoder, on data it has authenticated"})
+        self.run_command("cve.set", {"advisory": "CVE-2026-77", "project": "MB", "status": "affected",
+                                     "note": "the encoder is reachable after all"})
+        shown = self.run_command("cve.show", {"advisory": "CVE-2026-77"})["text"]
+        history = [line.strip() for line in shown.splitlines() if line.startswith("  - ")]
+        self.assertEqual(len(history), 3, shown)
+        self.assertIn("@scanner-agent (said): investigating, zstd-safe 7.3.0 in node/Cargo.lock", history[0])
+        self.assertIn("@cvescan (said): investigating → not_affected (vulnerable_code_not_in_execute_path), "
+                      "the vault only uses the plain stream encoder", history[1])
+        self.assertIn("someone (not said): not_affected → affected, the encoder is reachable after all", history[2])
+        text = self.files.versions["impacts/mb/cve-2026-77.toml"][-1]
+        self.assertIn('justification = ""', text)                                     # not not_affected now
+        self.assertEqual(text.count("[[history]]"), 3)
+
     def test_one_fix_records_several_advisories_at_once(self):
         got = self.run_command("cve.add", {"advisory": "RUSTSEC-2026-0367, RUSTSEC-2026-0368", "project": "MB",
                                            "package": "zip", "version": "8.6.0", "status": "affected"})
@@ -141,7 +166,7 @@ class ExtensionTests(unittest.TestCase):
     def test_refusals_say_what_to_do(self):
         self.assertIn("isn't recorded for MB: add it with /cve add",
                       self.refused("cve.set", {"advisory": "CVE-2026-404", "project": "MB", "status": "fixed"}))
-        self.assertIn("not_affected says why",
+        self.assertIn("not_affected needs VEX's justification, one of component_not_present",
                       self.refused("cve.add", {"advisory": "CVE-2026-5", "project": "MB", "status": "not_affected"}))
         self.assertIn("outside the folders", self.refused("cve.check", {"folder": "/etc"}))
         self.assertIn("which folder?", self.refused("cve.check", {}))
