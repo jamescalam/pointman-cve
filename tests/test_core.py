@@ -578,6 +578,10 @@ class PlanTests(unittest.TestCase):
         for a, b in zip(ordered, ordered[1:]):
             self.assertTrue(versions.less(a, b) and not versions.less(b, a), (a, b))
         self.assertEqual(versions.key("v4.4.0"), versions.key("4.4.0.0"))
+        for a, b in [("2.0.0-1", "2.0.0"), ("1.0.0-0.3.7", "1.0.0"), ("7.0.0-0", "7.0.0"),       # semver: digits
+                     ("1.0.0-1", "1.0.0-alpha"), ("1.0.0-0.3.7", "1.0.0-alpha"), ("6.99.0", "7.0.0-0"),
+                     ("v0.0.0-20210101000000-abcdef", "v0.0.0")]:                            # Go's pseudo-version
+            self.assertTrue(versions.less(a, b) and not versions.less(b, a), (a, b))
 
     def test_the_fix_is_the_one_for_the_pinned_version_s_line(self):
         """Real advisories: undici's has a range a release line; 7.30.0 is fixed in 7.30.1, not 6.29.1."""
