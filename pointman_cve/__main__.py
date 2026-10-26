@@ -96,13 +96,17 @@ def check_folder(folder: str, project: str | None) -> dict:
     if not files:
         return {"text": f"No lockfiles under {folder} on {machine()}.", "found": [], "opened": []}
     hits = scans.advisories(feeds, where, LOOK_UP, ext.log)
+    why = scans.signal(feeds, hits)
+    hits.sort(key=lambda h: (scans.first(h[1].kev if h[1] else None, h[1].epss if h[1] else None,
+                                         scans.severity_of(h[1]), h[1].score if h[1] else None), h[0][0]))
     found, made, lines = [], [], []
     b = book() if project else None
     for ids, a, keys in hits:
         pkgs = "; ".join(f"{e} {n} {v}" for e, n, v in keys)
-        lines.append(f"- **{ids[0]}** ({a.severity if a else 'unknown'}) {pkgs}"
+        lines.append(f"- **{ids[0]}** ({a.severity if a else 'unknown'}{scans.flags(a.kev, a.epss) if a else ''}) {pkgs}"
                      + (f": {a.summary[:100]}" if a else ""))
-        found.append({"advisory": ids, "packages": [list(k) for k in keys]})
+        found.append({"advisory": ids, "packages": [list(k) for k in keys], "kev": a.kev if a else None,
+                      "epss": a.epss if a else None, "cvss": a.score if a else None})
         if b is not None and not any(b.load(project, i) for i in ids):
             imp = scans.opened(project, ids, a, [{"file": f, "package": n, "version": v, "ecosystem": e,
                                                   "fixed_version": scans.fixed_for(a, n)}
@@ -113,6 +117,10 @@ def check_folder(folder: str, project: str | None) -> dict:
     head = (f"{len(files)} lockfiles, {len(where)} pinned versions on {machine()}: "
             + (f"{len(hits)} advisories hit them." if hits else "no advisory hits them."))
     tail = f"\nOpened {len(made)} impacts in {project.upper()} as investigating." if made else ""
+    if why:
+        tail += f"\nKnown-exploited and EPSS couldn't be had ({why}): in severity order."
+    if any(f["epss"] is not None for f in found):
+        tail += f"\n{scans.EPSS_CREDIT}"
     return {"text": head + ("\n" + "\n".join(lines) if lines else "") + tail, "found": found, "opened": made}
 
 
@@ -142,6 +150,9 @@ def scan_project(p: repos.Project, b: Book) -> dict:
         found = scans.advisories(feeds, got.where, log=ext.log)
     except ValueError as e:          # OSV wasn't answering: no answer isn't taken to mean every record has gone
         raise Retry(f"{p.key}: {e}") from None
+    why = scans.signal(feeds, found)
+    if why:                          # KEV and EPSS add to the scan: without them it goes on, in severity order
+        got.note = "; ".join(x for x in (got.note, f"known-exploited and EPSS couldn't be had ({why})") if x)
     by = f"cve scan on {machine()}" + (f" at {got.ref} ({got.commit[:8]})" if got.commit else "")
     return scans.scan(p.key, p.repo, got, found, b, by)
 
@@ -311,10 +322,13 @@ def impacts_cmd(job):
     found = [i for i in book().all(project) if not status or i.status == status]
     if not found:
         return {"text": "No impacts recorded" + (f" for {project}" if project else "") + "."}
-    lines = [f"- **{i.advisory[0]}** {i.project}: {i.status}" + (f", fixed in {i.fixed_in}" if i.fixed_in else "")
-             for i in sorted(found, key=lambda i: i.found, reverse=True)[:LISTED]]
+    ordered, signals, why = scans.fix_first(found, feeds)     # open ones first, fix-first; then newest first
+    lines = [f"- **{i.advisory[0]}** {i.project}: {i.status}" + scans.flags(*signals.get(i.path, (None, None)))
+             + (f", fixed in {i.fixed_in}" if i.fixed_in else "") for i in ordered[:LISTED]]
+    note = f"Known-exploited and EPSS couldn't be had ({why}): open ones are in severity order.\n" if why else ""
     more = f"\n…and {len(found) - LISTED} more in the pane." if len(found) > LISTED else ""
-    return {"text": f"{len(found)} impacts:\n" + "\n".join(lines) + more,
+    credit = f"\n{scans.EPSS_CREDIT}" if any(e is not None for _, e in signals.values()) else ""
+    return {"text": f"{len(found)} impacts:\n" + note + "\n".join(lines) + more + credit,
             "pane": {"open": "cve", "target": {"view": "impacts", **({"project": project} if project else {})}}}
 
 
@@ -351,7 +365,7 @@ def recent_blocks(eco: str | None, days: int) -> list[Block]:
 
 
 def impact_blocks(project: str | None) -> list[Block]:
-    found = sorted(book().all(project), key=lambda i: i.found, reverse=True)
+    found, _, _ = scans.fix_first(book().all(project), feeds)
     counts = {s: sum(1 for i in found if i.status == s) for s in STATUSES}
     tones = {"investigating": Tone.TONE_WARN, "affected": Tone.TONE_BAD, "not_affected": Tone.TONE_NEUTRAL,
              "fixed": Tone.TONE_GOOD}

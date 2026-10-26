@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from gitrepo import Repo, git
-from pointman_cve import lockfiles, repos, scans
+from pointman_cve import cvss, feeds, lockfiles, repos, scans
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
 from pointman_cve.store import Book, DirStore, path_ok
@@ -165,6 +165,7 @@ GITHUB_ADVISORY = {"ghsa_id": "GHSA-cw65-gx24-rc82", "cve_id": "CVE-2026-113716"
                                         "vulnerable_version_range": "< 20.36.0", "first_patched_version": "20.36.0"}]}
 OSV_VULN = {"id": "GHSA-xxxx-yyyy-zzzz", "aliases": ["CVE-2026-9999"], "summary": "rustls-webpki trusts a bad CA",
             "published": "2026-10-21T00:00:00Z", "database_specific": {"severity": "MODERATE"},
+            "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N"}],
             "affected": [{"package": {"ecosystem": "crates.io", "name": "rustls-webpki"},
                           "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.103.16"}]}]}]}
 
@@ -177,6 +178,15 @@ class FeedTests(unittest.TestCase):
         o = from_osv(OSV_VULN)
         self.assertEqual(o.ids(), ["CVE-2026-9999", "GHSA-xxxx-yyyy-zzzz"])
         self.assertEqual((o.severity, o.packages[0]["ecosystem"], o.packages[0]["fixed"]), ("medium", "rust", "0.103.16"))
+
+    def test_github_s_score_for_a_4_0_only_advisory(self):
+        """A real one: GitHub scores CVSS 4.0 itself, in cvss_severities; the older cvss field is empty."""
+        a = from_github(json.loads((FIXTURES / "github" / "GHSA-xmj3-9gf7-h52w.json").read_text()))
+        self.assertEqual((a.severity, a.score, a.cvss[:8]), ("low", 1.0, "CVSS:4.0"))
+        both = {"cvss_severities": {"cvss_v3": {"vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                                                "score": 7.5}, "cvss_v4": {"vector_string": "CVSS:4.0/x", "score": 8.7}}}
+        self.assertEqual(from_github(both).score, 7.5)                          # CVSS 3 first, as OSV's is
+        self.assertEqual(from_github({"cvss_severities": {"cvss_v3": {"score": 0, "vector_string": None}}}).score, None)
 
     def test_recent_asks_once_and_caches(self):
         calls = []
@@ -255,6 +265,44 @@ class FeedTests(unittest.TestCase):
                                ("actions", "some/action", "3.0.0"): ["GHSA-list"]})
         self.assertEqual(len([u for u in asked if "/vulns/" in u]), 4)                  # each advisory once
 
+    def test_osv_s_cvss_vector_gives_the_score_and_a_missing_severity(self):
+        self.assertEqual((from_osv(OSV_VULN).score, from_osv(OSV_VULN).cvss[:8]), (4.8, "CVSS:3.1"))
+        rustsec = {"id": "RUSTSEC-2026-0001", "database_specific": {"license": "CC0-1.0"},
+                   "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}]}
+        self.assertEqual((from_osv(rustsec).severity, from_osv(rustsec).score), ("high", 7.5))   # was unknown
+        v4 = {"id": "GHSA-xmj3-9gf7-h52w", "database_specific": {"severity": "LOW"},
+              "severity": [{"type": "CVSS_V4", "score": "CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:A/VC:N/VI:L/VA:L/SC:N/SI:N/SA:N"}]}
+        self.assertEqual((from_osv(v4).severity, from_osv(v4).score, from_osv(v4).cvss[:8]), ("low", None, "CVSS:4.0"))
+        self.assertEqual(from_osv({"id": "RUSTSEC-2026-0386"}).severity, "unknown")      # nothing to go on
+
+    def test_kev_and_epss_by_cve_a_page_at_a_time_cached_and_backed_off(self):
+        asked = []
+        cves = [f"CVE-2026-{n:04}" for n in range(150)]
+
+        def fetch(url, body):
+            asked.append(url)
+            if url == feeds.KEV:
+                return {"vulnerabilities": [{"cveID": "CVE-2026-0007", "dateAdded": "2026-10-01"}, {"cveID": "CVE-1999-1"}]}
+            asked_for = url.split("cve=", 1)[1].split(",")
+            return {"data": [{"cve": c, "epss": "0.5", "percentile": "0.9"} for c in asked_for if c.endswith("7")]}
+        f = Feeds(fetch)
+        kev, epss, why = f.exploited(cves + ["GHSA-not-a-cve", "cve-2026-0007"])
+        self.assertEqual((kev, why), ({"CVE-2026-0007": "2026-10-01"}, ""))
+        self.assertEqual(sorted(epss), [c for c in cves if c.endswith("7")])
+        self.assertEqual([u.startswith(feeds.EPSS) for u in asked], [False, True, True])     # 150 CVEs: two pages
+        self.assertTrue(all(len(u.split("cve=")[1]) < 2000 for u in asked[1:]))
+        f.exploited(cves)
+        self.assertEqual(len(asked), 3)                                                     # kept for the day
+
+        def down(url, body):
+            asked.append(url)
+            raise ValueError("couldn't reach www.cisa.gov")
+        g = Feeds(down)
+        self.assertEqual(g.exploited(["CVE-2026-0001"])[0], None)
+        n = len(asked)
+        self.assertIn("couldn't reach", g.exploited(["CVE-2026-0001"])[2])
+        self.assertEqual(len(asked), n)                                                     # not asked again yet
+
     def test_an_unknown_advisory_is_none(self):
         def fetch(url, body):
             raise ValueError("api.osv.dev answered 404")
@@ -280,7 +328,8 @@ class BookTests(unittest.TestCase):
 
 class OSV:
     """A stand-in OSV: rustls-webpki 0.103.15 has OSV_VULN (GHSA-xxxx-yyyy-zzzz, CVE-2026-9999); nothing else has
-    any. `asked` keeps every (ecosystem, name, version) it was asked about."""
+    any. `asked` keeps every (ecosystem, name, version) it was asked about. It stands in for CISA's KEV list and
+    FIRST's EPSS too: CVE-2026-9999 is known exploited, with an EPSS of 0.42."""
 
     def __init__(self):
         self.asked: list[tuple[str, str, str]] = []
@@ -294,6 +343,11 @@ class OSV:
                                 for q in queries]}
         if url.endswith("/vulns/GHSA-xxxx-yyyy-zzzz"):
             return OSV_VULN
+        if url == feeds.KEV or url.endswith("/kev.json"):
+            return {"vulnerabilities": [{"cveID": "CVE-2026-9999", "dateAdded": "2026-10-22"}]}
+        if url.startswith(feeds.EPSS) or "/epss?" in url:
+            return {"data": [{"cve": "CVE-2026-9999", "epss": "0.42000", "percentile": "0.97"}]
+                            if "CVE-2026-9999" in url else []}
         raise ValueError("api.osv.dev answered 404")
 
 
@@ -391,12 +445,14 @@ class ScanTests(unittest.TestCase):
     def scan(self, ref: str) -> dict:
         p = repos.Project("MB", str(self.repo.checkout), ref)
         got = repos.read(p, self.repo.checkout)
-        return scans.scan(p.key, p.repo, got, scans.advisories(self.feeds, got.where), self.book, "a test")
+        found = scans.advisories(self.feeds, got.where)
+        scans.signal(self.feeds, found)
+        return scans.scan(p.key, p.repo, got, found, self.book, "a test")
 
     def test_a_hit_at_one_ref_opens_a_record_and_is_gone_at_the_other(self):
         at_v1 = self.scan("v1")
         hit = {"advisory": "CVE-2026-9999", "package": "rustls-webpki", "version": "0.103.15", "ecosystem": "rust",
-               "severity": "medium", "fixed": "0.103.16"}
+               "severity": "medium", "fixed": "0.103.16", "kev": True, "epss": 0.42, "cvss": 4.8}
         self.assertEqual((at_v1["new"], at_v1["reopened"], at_v1["gone"], at_v1["open"]), ([hit], [], [], 1))
         self.assertEqual((at_v1["ref"], at_v1["commit"], at_v1["opened"]), ("v1", self.repo.v1, ["CVE-2026-9999"]))
         imp = self.book.load("MB", "CVE-2026-9999")
@@ -411,7 +467,7 @@ class ScanTests(unittest.TestCase):
 
         at_main = self.scan("origin/main")
         self.assertEqual((at_main["new"], at_main["reopened"], at_main["open"]), ([], [], 1))
-        self.assertEqual(at_main["gone"], [hit])
+        self.assertEqual(at_main["gone"], [{**hit, "kev": None, "epss": None, "cvss": None}])   # not looked up
         self.assertEqual(at_main["commit"], self.repo.v2)
         self.assertEqual(self.book.load("MB", "CVE-2026-9999").status, "investigating")   # gone changes nothing yet
 
@@ -439,8 +495,10 @@ class ScanTests(unittest.TestCase):
         text = scans.text(found, scans.totals(found))
         self.assertEqual(text.splitlines()[0], "Scanned MB: 1 new, 0 reopened, 0 gone, 1 open.")
         self.assertIn(f"**MB** at v1 ({self.repo.v1[:8]}), 1 lockfiles: 1 new, 0 reopened, 0 gone, 1 open.", text)
-        self.assertIn("- new: **CVE-2026-9999** (medium) rust rustls-webpki 0.103.15, fixed in 0.103.16", text)
-        self.assertTrue(text.endswith("Opened 1 records in MB as investigating."), text)
+        self.assertIn("- new: **CVE-2026-9999** (medium 4.8, known exploited, EPSS 42%) rust rustls-webpki 0.103.15, "
+                      "fixed in 0.103.16", text)
+        self.assertTrue(text.endswith("Opened 1 records in MB as investigating.\n\n"
+                                      "EPSS scores: FIRST, https://www.first.org/epss"), text)
 
     def test_a_project_that_couldn_t_be_read_counts_as_failed(self):
         bad = {"project": "PFE", "repo": "~/Documents/pfe", "ref": "origin/nope",
@@ -459,6 +517,49 @@ class ScanTests(unittest.TestCase):
         got = repos.read(repos.Project("MB", str(self.repo.checkout), "v1"), self.repo.checkout)
         with self.assertRaises(ValueError):
             scans.advisories(Feeds(down), got.where)
+
+
+class FixFirstTests(unittest.TestCase):
+    def test_cvss_3_scores_match_github_s(self):
+        """66 real vectors with the scores GitHub's advisory database gives them (tests/fixtures/SOURCES.md)."""
+        rows = [line.split("\t") for line in (FIXTURES / "cvss3.tsv").read_text().splitlines()]
+        self.assertEqual(len(rows), 66)
+        self.assertEqual([(v, cvss.score(v)) for v, _ in rows], [(v, float(s)) for v, s in rows])
+        self.assertEqual(cvss.score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"), 10.0)       # Log4Shell
+        for vector in ("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N", "AV:N/AC:L", "CVSS:3.1/AV:X"):
+            self.assertIsNone(cvss.score(vector), vector)
+        self.assertEqual([cvss.severity(x) for x in (9.0, 8.9, 7.0, 4.0, 3.9, 0.0, None)],
+                         ["critical", "high", "high", "medium", "low", "unknown", "unknown"])
+
+    def test_open_records_known_exploited_first_then_epss_then_severity(self):
+        def fetch(url, body):
+            if url == feeds.KEV:
+                return {"vulnerabilities": [{"cveID": "CVE-2026-0003", "dateAdded": "2026-10-01"}]}
+            return {"data": [{"cve": "CVE-2026-0002", "epss": "0.6"}, {"cve": "CVE-2026-0004", "epss": "0.01"}]}
+        records = [Impact(advisory=["CVE-2026-0001"], project="MB", status="affected", severity="critical"),
+                   Impact(advisory=["CVE-2026-0002"], project="MB", status="investigating", severity="low"),
+                   Impact(advisory=["GHSA-a", "CVE-2026-0003"], project="MB", status="affected", severity="medium"),
+                   Impact(advisory=["CVE-2026-0004"], project="MB", status="affected", severity="high"),
+                   Impact(advisory=["RUSTSEC-2026-0005"], project="MB", status="investigating", severity="unknown"),
+                   Impact(advisory=["CVE-2026-0006"], project="MB", status="fixed", severity="critical")]
+        ordered, signals, why = scans.fix_first(records, Feeds(fetch))
+        self.assertEqual([r.advisory[0] for r in ordered],
+                         ["GHSA-a", "CVE-2026-0002", "CVE-2026-0004", "CVE-2026-0001", "RUSTSEC-2026-0005",
+                          "CVE-2026-0006"])
+        self.assertEqual((signals[records[2].path], signals[records[1].path], why), ((True, None), (False, 0.6), ""))
+        self.assertNotIn(records[5].path, signals)                       # a fixed record isn't looked up
+
+        def down(url, body):
+            raise ValueError("offline")
+        self.assertLess(scans.first(None, 0.0003, "high", 7.5), scans.first(None, 0.0009, "medium", 5.3))   # noise
+        self.assertLess(scans.first(None, 0.04, "low"), scans.first(None, 0.0009, "critical"))           # not noise
+        self.assertEqual([scans.percent(x) for x in (0.42, 0.1, 0.0344, 0.00344, 0.0004)],
+                         ["42%", "10%", "3.4%", "0.3%", "<0.1%"])
+
+        ordered, signals, why = scans.fix_first(records, Feeds(down))   # severity order, and it says why
+        self.assertEqual([r.advisory[0] for r in ordered][:4], ["CVE-2026-0001", "CVE-2026-0004", "GHSA-a", "CVE-2026-0002"])
+        self.assertIn("offline", why)
+        self.assertEqual(signals[records[0].path], (None, None))
 
 
 class ManifestTests(unittest.TestCase):
