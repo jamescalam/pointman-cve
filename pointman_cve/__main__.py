@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import Counter
 from pathlib import Path
 
 from pointman_extension import Extension, Refused, Retry
-from pointman_extension_types import Block, Chart, Empty, Layout, PaneContent, PaneOpenResponse, Text, Tone
+from pointman_extension_types import (Block, Chart, Empty, Input, Layout, List, PaneContent, PaneOpenResponse, Text,
+                                      Tone)
 
 from . import lockfiles, repos, scans, vex
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
@@ -523,56 +525,193 @@ def recent_blocks(eco: str | None, days: int) -> list[Block]:
             if rows else empty("t", "Nothing new", "No advisories in that time.")]
 
 
-def plan_blocks(project: str) -> list[Block]:
-    """Each of a project's repos' upgrade plan, as its last scan left it."""
+def rows(name: str, items: list[List.Item], *, tap: bool = True, limit: int | None = None) -> Block:
+    return Block(name=name, list=List(style=List.Style.STYLE_ROWS, items=items, tap=tap, limit=limit))
+
+
+def buttons(name: str, *pairs: tuple[str, str]) -> Block:
+    return Block(name=name, input=Input(actions=Input.Actions(buttons=[Input.Actions.Button(id=i, title=t)
+                                                                        for i, t in pairs])))
+
+
+def when(at: str) -> str:
+    """An ISO time as a phone reads it: 26 Oct 22:10."""
+    try:
+        return time.strftime("%-d %b %H:%M", time.strptime(str(at)[:16], "%Y-%m-%dT%H:%M"))
+    except ValueError:
+        return str(at)[:16]
+
+
+def cve_of(r: Impact) -> str:
+    return next((i.upper() for i in r.advisory if i.upper().startswith("CVE-")), "")
+
+
+def last_scans(project: str) -> list[dict]:
+    """Each of a project's repos' last scan, as the scan kept it for the pane."""
     store, out = book().store, []
-    for n, f in enumerate(store.list(f"scans/{project.lower()}/")):
+    for f in store.list(f"scans/{project.lower()}/"):
         try:
-            last = json.loads(store.get(f["path"]) or "")
+            out.append(json.loads(store.get(f["path"]) or ""))
         except ValueError:
             continue
-        ups = [x for x in last.get("plan") or [] if x.get("to") and x.get("fixes")]
-        at = f"{last.get('ref')} ({str(last.get('commit'))[:8]})" if last.get("commit") else "its files"
-        out.append(heading(f"ph{n}", "Upgrade plan", f"{last.get('repo')} at {at}, scanned {str(last.get('scanned'))[:16]}"))
-        out.append(table(f"p{n}", ["Package", "From", "To", "Fixes"],
-                         [(f"{x['ecosystem']}:{x['package']}:{x['from']}", [x["package"], x["from"], x["to"], x["fixes"]])
-                          for x in ups]) if ups else empty(f"p{n}", "Nothing to upgrade", "No fix is named for what's open."))
     return out
 
 
-def impact_blocks(project: str | None) -> list[Block]:
-    found, _, _ = scans.fix_first(book().all(project), feeds)
-    counts = {s: sum(1 for i in found if i.status == s) for s in STATUSES}
+def picker_blocks() -> tuple[str, list[Block]]:
+    """Where the pane opens: every project, with what's open and when it was last scanned."""
+    records = book().all()
+    try:
+        keys = [p.key for p in repos.from_settings(ext.settings.get("projects") or [])]
+    except ValueError:
+        keys = []
+    keys = list(dict.fromkeys([*keys, *sorted({r.project for r in records})]))
+    if not keys:
+        return "CVE tracker", [heading("h", "CVE tracker", "No projects yet"),
+                               empty("projects", "No projects yet", "Add them to the projects setting, then /cve scan."),
+                               buttons("nav", ("recent", "Recent advisories"))]
+    kev, _, _ = feeds.exploited([cve_of(r) for r in records if r.status in scans.OPEN])
+    items = []
+    for k in keys:
+        open_ = [r for r in records if r.project == k and r.status in scans.OPEN]
+        exploited = sum(1 for r in open_ if kev and cve_of(r) in kev)
+        last = max((str(x.get("scanned") or "") for x in last_scans(k)), default="")
+        said = [f"{len(open_)} open", f"{exploited} known exploited" if exploited else "",
+                f"scanned {when(last)}" if last else "not scanned yet"]
+        items.append(List.Item(id=k, title=k, subtitle=" · ".join(x for x in said if x), badge="KEV" if exploited else None,
+                               tone=Tone.TONE_BAD if exploited else Tone.TONE_WARN if open_ else Tone.TONE_GOOD))
+    return "CVE tracker", [heading("h", "CVE tracker", f"{len(keys)} project{'s' if len(keys) != 1 else ''}"),
+                           rows("projects", items), buttons("nav", ("recent", "Recent advisories"))]
+
+
+def record_row(r: Impact, kev: bool | None, epss: float | None) -> List.Item:
+    pkgs = sorted({f"{w['package']} {w.get('version') or ''}".strip() for w in r.where if w.get("package")})
+    status = r.status.replace("_", " ") + (f" ({r.justification.replace('_', ' ')})" if r.justification else "")
+    said = [status, r.severity if r.severity != "unknown" else "", "known exploited" if kev else "",
+            f"EPSS {scans.percent(epss)}" if epss is not None else "", ", ".join(pkgs[:2]) + ("…" if len(pkgs) > 2 else "")]
+    tone = Tone.TONE_BAD if kev or r.status == "affected" else Tone.TONE_WARN if r.status in scans.OPEN \
+        else Tone.TONE_GOOD if r.status == "fixed" else Tone.TONE_NEUTRAL
+    return List.Item(id=r.path, title=r.advisory[0], subtitle=" · ".join(x for x in said if x),
+                     badge="KEV" if kev else None, tone=tone)
+
+
+def project_blocks(key: str) -> tuple[str, list[Block]]:
+    """A project: its counts, its open records fix-first, its upgrade plan and its last scans, then its closed ones."""
+    ordered, signals, why = scans.fix_first(book().all(key), feeds)
+    counts = {s: sum(1 for i in ordered if i.status == s) for s in STATUSES}
     tones = {"investigating": Tone.TONE_WARN, "affected": Tone.TONE_BAD, "not_affected": Tone.TONE_NEUTRAL,
              "fixed": Tone.TONE_GOOD}
-    stats = [stat(f"s{s}", s.replace("_", " ").capitalize(), counts[s], tones[s]) for s in STATUSES]
-    rows = [(i.path, [i.advisory[0], i.project, i.status.replace("_", " "), i.fixed_in or "-",
-                      (i.prs[0].rsplit("/", 2)[-2] + "/" + i.prs[0].rsplit("/", 1)[-1]) if i.prs else "-"])
-            for i in found]
-    return [heading("h", "Our impacts", project or "every project"),
-            Block(name="st", layout=Layout(stack=Layout.Stack(children=stats, horizontal=True))),
-            table("t", ["Advisory", "Project", "Status", "Fixed in", "PR"], rows)
-            if rows else empty("t", "Nothing recorded yet", "/cve add <advisory> <project> records one."),
-            *(plan_blocks(project) if project else [])]
+    open_ = [record_row(r, *signals.get(r.path, (None, None))) for r in ordered if r.status in scans.OPEN]
+    closed = [record_row(r, None, None) for r in ordered if r.status not in scans.OPEN]
+    kept = last_scans(key)
+    plan = [List.Item(id=f"{x['ecosystem']}:{x['package']}:{x['from']}:{n}", title=f"{x['package']} {x['from']} → {x['to']}",
+                      subtitle=" · ".join(y for y in [f"fixes {x['fixes']}", "known exploited" if x.get("kev") else "",
+                                                       ", ".join(x.get("files") or []), str(last.get("repo") or "")] if y),
+                      tone=Tone.TONE_BAD if x.get("kev") else Tone.TONE_WARN)
+            for n, last in enumerate(kept) for x in last.get("plan") or [] if x.get("to") and x.get("fixes")]
+    scanned = [List.Item(id=str(last.get("repo")), title=str(last.get("repo")),
+                         subtitle=" · ".join([f"{last.get('ref')} ({str(last.get('commit'))[:8]})" if last.get("commit")
+                                              else "its files", f"scanned {when(str(last.get('scanned')))}",
+                                              f"{last.get('new', 0)} new, {last.get('gone', 0)} gone, {last.get('open', 0)} open"]))
+               for last in kept]
+    latest = max((str(x.get("scanned") or "") for x in kept), default="")
+    blocks = [heading("h", key, f"last scanned {when(latest)}" if latest else "not scanned yet"),
+              buttons("nav", ("projects", "All projects")),
+              Block(name="st", layout=Layout(stack=Layout.Stack(
+                  children=[stat(f"s{s}", s.replace("_", " ").capitalize(), counts[s], tones[s]) for s in STATUSES],
+                  horizontal=True))),
+              heading("oh", "Open, fix first", why and f"Known-exploited and EPSS couldn't be had: {why}" or
+                      "known exploited, then EPSS, then severity"),
+              rows("open", open_) if open_ else empty("open", "Nothing open", "No record is investigating or affected."),
+              heading("ph", "Upgrade plan", "from each repo's last scan"),
+              rows("plan", plan, tap=False) if plan else empty("plan", "Nothing to upgrade",
+                                                                "No fix is named for what's open, or no scan yet."),
+              heading("sh", "Last scans", f"{len(kept)} repo{'s' if len(kept) != 1 else ''}"),
+              rows("scans", scanned, tap=False) if scanned else empty("scans", "Not scanned yet", f"/cve scan {key}")]
+    if closed:
+        blocks += [heading("ch", "Closed", "fixed or not affected"), rows("closed", closed, limit=10)]
+    return f"CVE · {key}", blocks
+
+
+def record_blocks(path: str) -> tuple[str, list[Block]]:
+    """One record: what it is, where it hit, its evidence, and its history, newest first."""
+    text = book().store.get(path) if path.startswith("impacts/") else None
+    if not text:
+        raise Refused(f"there's no record at {path}")
+    r = Impact.from_toml(text)
+    status = r.status.replace("_", " ") + (f" ({r.justification.replace('_', ' ')})" if r.justification else "")
+    about = [r.title, f"Also known as {', '.join(r.advisory[1:])}." if r.advisory[1:] else "",
+             f"Severity: {r.severity}." if r.severity != "unknown" else "",
+             f"Found {when(r.found)}" + (f" by {r.found_by}" if r.found_by else "") + ".",
+             f"Fixed in {r.fixed_in}." if r.fixed_in else "", confirmation(r).removeprefix(", ").capitalize()]
+    where = [List.Item(id=f"w{n}", title=f"{w.get('package')} {w.get('version') or ''}".strip()
+                       + (f" → {w['fixed_version']}" if w.get("fixed_version") else ""),
+                       subtitle=" · ".join(str(x) for x in (w.get("repo"), w.get("file")) if x))
+             for n, w in enumerate(r.where) if w.get("package")]
+    evidence = ([List.Item(id=f"pr{n}", title=link.rsplit("/", 2)[-2] + "/" + link.rsplit("/", 1)[-1], subtitle=link, link=link)
+                 for n, link in enumerate(r.prs)]
+                + [List.Item(id=f"t{n}", title=f"Thread {t.rsplit('/', 1)[-1]}", link=t) for n, t in enumerate(r.threads)]
+                + [List.Item(id=f"k{n}", title=t, link=f"pointman://item/{t}") for n, t in enumerate(r.tasks)])
+    history = [List.Item(id=f"h{n}", title=(f"{h['was'].replace('_', ' ')} → " if h.get("was") else "")
+                         + str(h.get("status", "")).replace("_", " ")
+                         + (f" ({h['justification'].replace('_', ' ')})" if h.get("justification") else ""),
+                         subtitle=" · ".join(str(x) for x in [h.get("by") or (f"{h['by_said']} (said)" if h.get("by_said")
+                                                                            else "someone (not said)"),
+                                                              when(str(h.get("at"))), h.get("why"),
+                                                              ", ".join(h.get("evidence") or [])] if x))
+               for n, h in reversed(list(enumerate(r.history)))]
+    blocks = [heading("h", r.advisory[0], f"{r.project} · {status}"),
+              buttons("nav", (f"project:{r.project}", f"Back to {r.project}"), ("projects", "All projects")),
+              Block(name="about", text=Text(markdown="\n\n".join(x for x in about if x))),
+              heading("wh", "Where it hit", f"{len(where)} place{'s' if len(where) != 1 else ''}"),
+              rows("where", where, tap=False) if where else empty("where", "No place named", "It was recorded by hand."),
+              heading("eh", "Evidence", "PRs, threads and tasks"),
+              rows("evidence", evidence, tap=False) if evidence else empty("evidence", "None yet",
+                                                                           "fixed needs a PR, commit or release."),
+              heading("hh", "History", "newest first"),
+              rows("history", history, tap=False) if history else empty("history", "Before 0.8.0",
+                                                                         "Changes are kept from 0.8.0 on.")]
+    return r.advisory[0], blocks
+
+
+def view(target: dict) -> tuple[str, list[Block]]:
+    """What a target shows: the picker, a project, a record, or recent advisories."""
+    v = str(target.get("view") or "projects")
+    if v == "recent":
+        return "Recent advisories", recent_blocks(ecosystem_of(target.get("ecosystem")), int(target.get("days") or 7))
+    if v == "record" and target.get("path"):
+        return record_blocks(str(target["path"]))
+    if v in ("impacts", "project") and target.get("project"):
+        return project_blocks(str(target["project"]).upper())
+    return picker_blocks()
 
 
 @ext.pane("cve")
 def open_pane(pane):
-    t = pane.target or {}
-    view = t.get("view") or "recent"
     try:
-        if view == "impacts":
-            blocks = impact_blocks(t.get("project"))
-            title = "CVE impacts"
-        else:
-            blocks = recent_blocks(ecosystem_of(t.get("ecosystem")), int(t.get("days") or 7))
-            title = "Recent advisories"
+        title, blocks = view(pane.target or {})
     except (ValueError, RuntimeError) as e:
-        blocks, title = [empty("e", "Couldn't load it", str(e))], "CVE tracker"
+        title, blocks = "CVE tracker", [empty("e", "Couldn't load it", str(e))]
 
     @pane.on_input
     def tapped(event):
-        raise Refused("the CVE pane is read-only: change a record with /cve set")
+        """Taps move between the views: a project, a record, back. Records change with /cve set."""
+        f = event.fields or {}
+        block, value = f.get("block"), str(f.get("value") or f.get("item") or "")
+        if event.kind != "tap" or not value:
+            raise Refused("the CVE pane only shows records: change one with /cve set")
+        if block == "projects":
+            target = {"view": "project", "project": value}
+        elif block in ("open", "closed"):
+            target = {"view": "record", "path": value}
+        elif block == "nav" and value in ("projects", "recent"):
+            target = {"view": value}
+        elif block == "nav" and value.startswith("project:"):
+            target = {"view": "project", "project": value.removeprefix("project:")}
+        else:
+            raise Refused("the CVE pane only shows records: change one with /cve set")
+        title, blocks = view(target)
+        pane.set_title(title)
+        pane.show(blocks)
 
     return PaneOpenResponse(title=title, content=PaneContent(blocks=blocks))
 
