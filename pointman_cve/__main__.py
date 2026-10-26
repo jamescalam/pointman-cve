@@ -90,12 +90,15 @@ LOOK_UP = 40      # advisories a check looks up; the rest are listed by id
 
 def check_folder(folder: str, project: str | None) -> dict:
     root = ext.allowed(folder)
-    files, where = lockfiles.find(root), {}
+    skipped: list = []
+    files, where = lockfiles.find(root, skipped_out=skipped), {}
     for lf in files:
         for key in lockfiles.pinned(lf):
             where.setdefault(key, []).append(str(lf))
     if not files:
-        return {"text": f"No lockfiles under {folder} on {machine()}.", "found": [], "opened": []}
+        return {"text": f"No lockfiles under {folder} on {machine()}"
+                        + (f" but test data ({len(skipped)} skipped)." if skipped else "."),
+                "found": [], "opened": [], "skipped": len(skipped)}
     hits = scans.advisories(feeds, where, LOOK_UP, ext.log)
     why = scans.signal(feeds, hits)
     hits.sort(key=lambda h: (scans.first(h[1].kev if h[1] else None, h[1].epss if h[1] else None,
@@ -116,14 +119,16 @@ def check_folder(folder: str, project: str | None) -> dict:
             imp.log(imp.found_by, f"found in {folder}")
             b.save(imp)
             made.append(imp.path)
-    head = (f"{len(files)} lockfiles, {len(where)} pinned versions on {machine()}: "
+    head = (f"{len(files)} lockfiles" + (f" ({len(skipped)} skipped as test data)" if skipped else "")
+            + f", {len(where)} pinned versions on {machine()}: "
             + (f"{len(hits)} advisories hit them." if hits else "no advisory hits them."))
     tail = f"\nOpened {len(made)} impacts in {project.upper()} as investigating." if made else ""
     if why:
         tail += f"\nKnown-exploited and EPSS couldn't be had ({why}): in severity order."
     if any(f["epss"] is not None for f in found):
         tail += f"\n{scans.EPSS_CREDIT}"
-    return {"text": head + ("\n" + "\n".join(lines) if lines else "") + tail, "found": found, "opened": made}
+    return {"text": head + ("\n" + "\n".join(lines) if lines else "") + tail, "found": found, "opened": made,
+            "skipped": len(skipped)}
 
 
 @ext.command("cve.check")
@@ -177,6 +182,7 @@ def scan_project(p: repos.Project, b: Book) -> dict:
     done = scans.scan(p.key, p.repo, got, found, b, by)
     b.store.put(last_scan(p.key, p.repo), json.dumps({
         "project": p.key, "repo": p.repo, "ref": got.ref, "commit": got.commit, "scanned": now(), "open": done["open"],
+        "skipped": done["skipped"],
         **{k: len(done[k]) for k in ("new", "reopened", "gone", "still", "confirmed")}, "plan": done["plan"]}, indent=1))
     return done
 

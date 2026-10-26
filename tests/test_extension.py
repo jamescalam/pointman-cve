@@ -170,6 +170,11 @@ class ExtensionTests(unittest.TestCase):
                       self.refused("cve.add", {"advisory": "CVE-2026-5", "project": "MB", "status": "not_affected"}))
         self.assertIn("outside the folders", self.refused("cve.check", {"folder": "/etc"}))
         self.assertIn("which folder?", self.refused("cve.check", {}))
+        (self.dir / "app" / "lib" / "tests").mkdir(parents=True)
+        shutil.copy(ROOT / "tests" / "fixtures" / "Cargo.lock", self.dir / "app" / "lib" / "tests")
+        got = self.run_command("cve.check", {"folder": str(self.dir / "app" / "lib")})         # test data only
+        self.assertEqual((got["skipped"], got["found"]), (1, []))
+        self.assertIn("but test data (1 skipped)", got["text"])
 
     def test_the_pane_shows_our_impacts(self):
         self.run_command("cve.add", {"advisory": "GHSA-abcd-efgh-ijkl", "project": "PFE", "status": "affected"})
@@ -260,7 +265,7 @@ class ExtensionTests(unittest.TestCase):
                               "note": "",
                               "plan": [{"ecosystem": "rust", "package": "rustls-webpki", "from": "0.103.15",
                                         "to": "0.103.16", "fixes": 1, "advisories": ["CVE-2026-9999"],
-                                        "unfixed": [], "kev": True, "files": ["node/Cargo.lock"]}]})
+                                        "unfixed": [], "kev": True, "files": ["node/Cargo.lock"]}], "skipped": 0})
         self.assertEqual((web["ref"], web["commit"], web["new"], web["open"]), ("", "", [], 0))
         self.assertEqual(web["note"], "read as files, not from git: it isn't a git repo")
         self.assertTrue(got["text"].startswith("Scanned MB, WEB: 1 new, 0 reopened, 0 gone, 1 open."), got["text"])
