@@ -178,7 +178,8 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
             confirmed.append(r.advisory[0])
     return {"project": key, "repo": repo, "ref": got.ref, "commit": got.commit, "new": new, "reopened": reopened,
             "still": still, "confirmed": confirmed, "gone": gone, "open": sum(1 for r in records if r.status in OPEN),
-            "note": got.note, "plan": plan(found, records, got.where), "files": len(got.files), "opened": made}
+            "note": got.note, "plan": plan(found, records, got.where), "skipped": len(got.skipped),
+            "files": len(got.files), "opened": made}
 
 
 def plan(found: Found, records: list[Impact], where: dict[tuple, list[str]]) -> list[dict]:
@@ -246,7 +247,8 @@ def text(found: list[dict], all_: dict) -> str:
             continue
         at = f" at {f['ref']} ({f['commit'][:8]})" if f["commit"] else ""
         note = f" {f['note'][0].upper()}{f['note'][1:]}." if f["note"] else ""
-        lines.append(f"\n**{f['project']}**{at}, {f['files']} lockfiles: {len(f['new'])} new, "
+        skipped = f" ({f['skipped']} skipped: test data, or the skip setting)" if f.get("skipped") else ""
+        lines.append(f"\n**{f['project']}**{at}, {f['files']} lockfiles{skipped}: {len(f['new'])} new, "
                      f"{len(f['reopened'])} reopened, {len(f['gone'])} gone, {f['open']} open.{note}")
         rows = [(kind, h) for kind in ("new", "reopened", "still there", "gone") for h in f[kind.split()[0]]]
         lines += [f"- {kind}: **{h['advisory']}** ({h['severity']}"

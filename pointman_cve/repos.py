@@ -29,6 +29,8 @@ class Project:
     key: str                  # MB
     repo: str                 # as set: ~/Documents/message-board
     ref: str = REF
+    skip: tuple[str, ...] = ()       # more paths that aren't the project's (globs, or folders), beside test data
+    include: tuple[str, ...] = ()    # paths to read anyway
 
 
 @dataclass
@@ -36,6 +38,7 @@ class Read:
     """What a project's lockfiles pin, (ecosystem, name, version) → the lockfiles that pin it (paths in the repo)."""
     where: dict[tuple[str, str, str], list[str]] = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)   # lockfiles that aren't the project's: test data, `skip`
     name: str = ""            # the repo in its records: owner/repo, or ~/… for a folder without a remote
     ref: str = ""             # the ref read, and its commit: both empty for a folder read as files
     commit: str = ""
@@ -58,7 +61,13 @@ def from_settings(value) -> list[Project]:
         ref = ref or REF
         if ref.startswith("-") or not REF_OK.fullmatch(ref):
             raise ValueError(f"projects #{n} ({key}): ref is a branch, tag or commit (origin/main), not {ref!r}")
-        out.append(Project(key.upper(), repo, ref))
+        paths = {}
+        for k in ("skip", "include"):
+            given = p.get(k) or []
+            if not isinstance(given, list) or not all(isinstance(x, str) for x in given):
+                raise ValueError(f"projects #{n} ({key}): {k} is a list of paths in the repo (tests/data, *.lock)")
+            paths[k] = tuple(x.strip() for x in given if x.strip())
+        out.append(Project(key.upper(), repo, ref, **paths))
     return out
 
 
@@ -97,7 +106,7 @@ def read(p: Project, folder: Path) -> Read:
         prefix = git(folder, "rev-parse", "--show-prefix").strip()
     except GitFailed as e:
         why = "it isn't a git repo" if "not a git repository" in str(e) else str(e)
-        return read_folder(folder, f"read as files, not from git: {why}")
+        return read_folder(folder, f"read as files, not from git: {why}", p.skip, p.include)
     remotes = git(folder, "remote").split()
     remote = p.ref.split("/", 1)[0] if p.ref.split("/", 1)[0] in remotes else ""
     note = ""
@@ -120,7 +129,10 @@ def read(p: Project, folder: Path) -> Read:
             continue
         meta, path = entry.split("\t", 1)
         mode, kind, _ = meta.split(" ", 2)
-        if kind != "blob" or mode == "120000" or not lockfiles.wanted(path.removeprefix(prefix)):
+        said = lockfiles.verdict(path.removeprefix(prefix), p.skip, p.include) if kind == "blob" and mode != "120000" else ""
+        if said == "skipped":
+            got.skipped.append(path)
+        if said != "read":
             continue
         got.files.append(path)
         for key in lockfiles.parse(path, git(folder, "show", f"{commit}:{path}")):
@@ -128,11 +140,13 @@ def read(p: Project, folder: Path) -> Read:
     return got
 
 
-def read_folder(folder: Path, note: str) -> Read:
+def read_folder(folder: Path, note: str, skip=(), include=()) -> Read:
     got = Read(name=home_path(folder), note=note)
-    for lf in lockfiles.find(folder):
+    skipped: list[Path] = []
+    for lf in lockfiles.find(folder, skip, include, skipped):
         path = str(lf.relative_to(folder))
         got.files.append(path)
         for key in lockfiles.pinned(lf):
             got.where.setdefault(key, []).append(path)
+    got.skipped = [str(x.relative_to(folder)) for x in skipped]
     return got

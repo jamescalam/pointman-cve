@@ -114,6 +114,20 @@ class LockfileTests(unittest.TestCase):
                              (".github/workflows/README.md", False)]:
             self.assertEqual(lockfiles.wanted(path), wanted, path)
 
+    def test_test_data_isn_t_the_project_s(self):
+        for path, skip, include, said in [
+                ("node/Cargo.lock", (), (), "read"),
+                ("tests/fixtures/Cargo.lock", (), (), "skipped"), ("test/uv.lock", (), (), "skipped"),
+                ("crates/x/testdata/go.sum", (), (), "skipped"), ("examples/app/package-lock.json", (), (), "skipped"),
+                ("vendor/github.com/a/go.sum", (), (), "skipped"), ("Tests/Gemfile.lock", (), (), "skipped"),
+                ("latest/Cargo.lock", (), (), "read"), ("node/README.md", (), (), ""),
+                ("node_modules/x/package-lock.json", (), ("node_modules",), ""),        # never walked: not ours either way
+                ("examples/app/package-lock.json", (), ("examples/app",), "read"),       # include wins
+                ("legacy/web/yarn.lock", ("legacy",), (), "skipped"), ("web/yarn.lock", ("*/yarn.lock",), (), "skipped"),
+                ("tests/e2e/uv.lock", ("tests",), ("tests/e2e/uv.lock",), "read"),
+                (".github/workflows/ci.yml", (), (), "read")]:
+            self.assertEqual(lockfiles.verdict(path, skip, include), said, (path, skip, include))
+
     def test_the_newer_kinds_from_real_files(self):
         """Each from a public project's own lockfile, trimmed (tests/fixtures/SOURCES.md)."""
         self.assertEqual(lockfiles.pinned(FIXTURES / "pnpm-lock.yaml"),      # vuejs/core: pnpm itself in its own document
@@ -168,6 +182,18 @@ class LockfileTests(unittest.TestCase):
         ]
         for path, text, pins in cases:
             self.assertEqual(lockfiles.parse(path, text), pins, text[:40])
+
+    def test_a_folder_s_test_data_is_skipped_and_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for folder in ("node", "tests/fixtures", "examples/app"):
+                (root / folder).mkdir(parents=True)
+                shutil.copy(FIXTURES / "Cargo.lock", root / folder)
+            skipped = []
+            self.assertEqual([str(p.relative_to(root)) for p in lockfiles.find(root, skipped_out=skipped)], ["node/Cargo.lock"])
+            self.assertEqual(sorted(str(p.relative_to(root)) for p in skipped),
+                             ["examples/app/Cargo.lock", "tests/fixtures/Cargo.lock"])
+            self.assertEqual(len(lockfiles.find(root, include=("examples/app",))), 2)
 
     def test_a_folder_s_workflows_and_requirements_are_found(self):
         with tempfile.TemporaryDirectory() as d:
@@ -388,9 +414,12 @@ class RepoTests(unittest.TestCase):
                                    {"key": "PFE", "repo": "~/Documents/pfe", "ref": "v1.2"}])
         self.assertEqual(got, [repos.Project("MB", "~/Documents/message-board", "origin/main"),
                                repos.Project("PFE", "~/Documents/pfe", "v1.2")])
+        got = repos.from_settings([{"key": "MB", "repo": "x", "skip": ["legacy/", " "], "include": ["examples/app"]}])
+        self.assertEqual((got[0].skip, got[0].include), (("legacy/",), ("examples/app",)))
         for value, says in [({"key": "MB"}, "a list"), ([{"key": "my project", "repo": "x"}], "key"),
                             ([{"key": "MB"}], "repo"), ([{"key": "MB", "repo": "x", "ref": "--upload-pack=x"}], "ref"),
-                            ([{"key": "MB", "repo": "x", "ref": "main branch"}], "ref"), (["MB"], "{key, repo, ref}")]:
+                            ([{"key": "MB", "repo": "x", "ref": "main branch"}], "ref"), (["MB"], "{key, repo, ref}"),
+                            ([{"key": "MB", "repo": "x", "skip": "tests"}], "skip is a list of paths")]:
             with self.assertRaises(ValueError) as e:
                 repos.from_settings(value)
             self.assertIn(says, str(e.exception))
@@ -436,6 +465,20 @@ class RepoTests(unittest.TestCase):
         self.assertEqual(got.where[("actions", "actions/checkout", "v7.0.1")], [".github/workflows/ci.yml"])
         self.assertEqual(got.where[("pip", "celery", "5.6.3")], ["requirements/main.txt"])
         self.assertEqual(got.where[("npm", "pnpm", "12.11.2")], ["web/pnpm-lock.yaml"])
+
+    def test_a_fixture_lockfile_beside_a_real_one_is_skipped_at_the_ref(self):
+        """The bug: a repo's own test data, read as if it shipped (pointman-cve's tests/fixtures)."""
+        r = Repo(self.dir / "app")
+        r.commit({"tests/fixtures/Cargo.lock": (FIXTURES / "Cargo.lock").read_text()}, "a fixture")   # 0.103.15
+        git(r.writer, "push", "--quiet", "origin", "main")
+        got = repos.read(repos.Project("MB", str(r.checkout)), r.checkout)
+        self.assertEqual((got.files, got.skipped), (["node/Cargo.lock"], ["tests/fixtures/Cargo.lock"]))
+        self.assertEqual(list(got.where), [("rust", "rustls-webpki", "0.103.16")])           # only the real one
+        got = repos.read(repos.Project("MB", str(r.checkout), include=("tests/fixtures",)), r.checkout)
+        self.assertEqual(got.skipped, [])
+        self.assertIn(("rust", "rustls-webpki", "0.103.15"), got.where)
+        got = repos.read(repos.Project("MB", str(r.checkout), skip=("node",)), r.checkout)
+        self.assertEqual((got.files, sorted(got.skipped)), ([], ["node/Cargo.lock", "tests/fixtures/Cargo.lock"]))
 
     def test_a_ref_it_doesn_t_have_is_refused(self):
         r = Repo(self.dir / "app")
@@ -697,7 +740,8 @@ class ManifestTests(unittest.TestCase):
         m = tomllib.loads((ROOT / "extension.toml").read_text())
         self.assertEqual(sorted(m["settings"]["properties"]), ["ecosystem", "projects"])
         item = m["settings"]["properties"]["projects"]["items"]
-        self.assertEqual((sorted(item["properties"]), item["required"]), (["key", "ref", "repo"], ["key", "repo"]))
+        self.assertEqual((sorted(item["properties"]), item["required"]),
+                         (["include", "key", "ref", "repo", "skip"], ["key", "repo"]))
         scan = next(c for c in m["commands"] if c["kind"] == "cve.scan")
         self.assertEqual((scan["slash"], list(scan["params"]["properties"])), ("scan", ["project"]))
         self.assertEqual([e["name"] for e in m["events"]], ["cve.scanned"])

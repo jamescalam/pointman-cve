@@ -6,6 +6,7 @@ files count in a folder and in a git tree."""
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -15,7 +16,8 @@ from pathlib import Path
 
 NAMES = ("Cargo.lock", "uv.lock", "poetry.lock", "go.sum", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
          "Gemfile.lock", "composer.lock")
-SKIP = {".git", "node_modules", "target", ".venv", "venv", "vendor", "__pycache__", "dist", "build", ".cache"}
+SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", "dist", "build", ".cache"}   # never walked
+NOT_OURS = {"tests", "test", "fixtures", "testdata", "examples", "vendor"}   # a project's test data, others' code
 DEPTH = 4
 WORKFLOWS = (".github", "workflows")       # only the repo's own, at its root: where GitHub runs them from
 
@@ -47,18 +49,37 @@ def kind(path: str) -> str | None:
     return None
 
 
-def wanted(path: str) -> bool:
-    """Whether a path in a tree (`node/Cargo.lock`) is a lockfile find() would read in a folder."""
+def matches(path: str, patterns) -> bool:
+    """Whether a path is one a pattern names: a glob (`legacy/*/Cargo.lock`), or a folder or file (`docs/site`)."""
+    return any(fnmatch.fnmatchcase(path, p) or path == p.strip("/") or path.startswith(p.strip("/") + "/")
+               for p in patterns if p.strip("/"))
+
+
+def verdict(path: str, skip=(), include=()) -> str:
+    """What becomes of a path in a tree (`node/Cargo.lock`): "read"; "skipped", a lockfile that isn't the project's
+    own (under a tests, test, fixtures, testdata, examples or vendor folder at any depth, or one `skip` names),
+    unless `include` names it; or "" when it's no lockfile of ours (or too deep, or in a build folder)."""
     *folders, _ = path.split("/")
     k = kind(path)
     if k == "workflow":
-        return tuple(folders) == WORKFLOWS
-    return k is not None and len(folders) <= DEPTH and not any(skipped(f) for f in folders)
+        return "read" if tuple(folders) == WORKFLOWS else ""
+    if k is None or len(folders) > DEPTH or any(skipped(f) for f in folders):
+        return ""
+    if matches(path, include):
+        return "read"
+    if any(f.lower() in NOT_OURS for f in folders) or matches(path, skip):
+        return "skipped"
+    return "read"
 
 
-def find(root: Path) -> list[Path]:
-    """The lockfiles under root, at most DEPTH folders down, skipping build and dependency folders, and its own
-    workflows."""
+def wanted(path: str, skip=(), include=()) -> bool:
+    """Whether a path in a tree is a lockfile find() would read in a folder."""
+    return verdict(path, skip, include) == "read"
+
+
+def find(root: Path, skip=(), include=(), skipped_out: list | None = None) -> list[Path]:
+    """The lockfiles under root, at most DEPTH folders down, and its own workflows, but not build and dependency
+    folders, and not test data (verdict); those it skips go in skipped_out."""
     root = Path(root)
     out: list[Path] = sorted(p for p in root.joinpath(*WORKFLOWS).glob("*") if p.is_file() and wanted(
         "/".join([*WORKFLOWS, p.name])))
@@ -68,8 +89,11 @@ def find(root: Path) -> list[Path]:
         if len(Path(d).parts) - base >= DEPTH:
             dirs[:] = []
         for f in sorted(files):
-            if wanted(str((Path(d) / f).relative_to(root)).replace(os.sep, "/")):
+            said = verdict(str((Path(d) / f).relative_to(root)).replace(os.sep, "/"), skip, include)
+            if said == "read":
                 out.append(Path(d) / f)
+            elif said == "skipped" and skipped_out is not None:
+                skipped_out.append(Path(d) / f)
     return out
 
 
