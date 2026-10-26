@@ -109,7 +109,7 @@ def read(p: Project, folder: Path) -> Read:
     try:
         commit = git(folder, "rev-parse", "--verify", "--quiet", f"{p.ref}^{{commit}}").strip()
     except GitFailed:
-        raise ValueError(f"{p.key}: {p.ref} isn't a branch, tag or commit in {p.repo}") from None
+        raise ValueError(f"{p.ref} isn't a branch, tag or commit in {p.repo}") from None
     try:
         url = git(folder, "remote", "get-url", remote or (remotes[0] if remotes else "origin")).strip()
     except GitFailed:

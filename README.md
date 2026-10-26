@@ -48,6 +48,8 @@ The statuses are VEX's (Vulnerability Exploitability eXchange), so the records c
 - **`repo`** is its git folder under `~/Documents`. A scan fetches it first, lists its lockfiles at the ref and reads each one with `git show <ref>:<path>`. The working tree is never read, so an old or dirty checkout can't change the answer. A folder that isn't a git repo is read as files, and the answer says so.
 - **`ref`** is a branch, tag or commit: `origin/main` if left out.
 
+A project that can't be read (its folder is missing, its ref unknown, or git fails) gets an `error` in the answer, and the others are still scanned. The answer and the event count these in `failed`. A scan is refused only when no project could be read.
+
 Nothing runs on its own. A scan runs when someone asks for one, or when a workflow calls `cve.scan`. When it's done it sends the event `cve.scanned`, with the counts in all and for each project. A scan with nothing new still answers, so a workflow can branch on `new`.
 
 ## Permissions

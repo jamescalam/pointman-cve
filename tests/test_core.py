@@ -5,7 +5,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from gitrepo import Repo, cargo_lock, git
+from gitrepo import Repo, git
 from pointman_cve import lockfiles, repos, scans
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
@@ -319,6 +319,17 @@ class ScanTests(unittest.TestCase):
         self.assertIn(f"**MB** at v1 ({self.repo.v1[:8]}), 1 lockfiles: 1 new, 0 reopened, 0 gone, 1 open.", text)
         self.assertIn("- new: **CVE-2026-9999** (medium) rust rustls-webpki 0.103.15, fixed in 0.103.16", text)
         self.assertTrue(text.endswith("Opened 1 records in MB as investigating."), text)
+
+    def test_a_project_that_couldn_t_be_read_counts_as_failed(self):
+        bad = {"project": "PFE", "repo": "~/Documents/pfe", "ref": "origin/nope",
+               "error": "origin/nope isn't a branch, tag or commit in ~/Documents/pfe"}
+        found = [self.scan("v1"), bad]
+        all_ = scans.totals(found)
+        self.assertEqual(all_, {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 1})
+        text = scans.text(found, all_)
+        self.assertEqual(text.splitlines()[0], "Scanned MB, PFE: 1 new, 0 reopened, 0 gone, 1 open, 1 failed.")
+        self.assertIn("\n**PFE** couldn't be scanned: origin/nope isn't a branch, tag or commit in ~/Documents/pfe.",
+                      text)
 
     def test_osv_not_answering_fails_the_scan(self):
         def down(url, body):

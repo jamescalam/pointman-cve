@@ -219,8 +219,8 @@ class ExtensionTests(unittest.TestCase):
         got = self.run_command("cve.scan", {})
         hit = {"advisory": "CVE-2026-9999", "package": "rustls-webpki", "version": "0.103.15", "ecosystem": "rust",
                "severity": "medium", "fixed": "0.103.16"}
-        self.assertEqual({k: got[k] for k in ("new", "reopened", "gone", "open")},
-                         {"new": 1, "reopened": 0, "gone": 0, "open": 1})
+        self.assertEqual({k: got[k] for k in ("new", "reopened", "gone", "open", "failed")},
+                         {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 0})
         mb, web = got["projects"]
         self.assertEqual(mb, {"project": "MB", "repo": str(repo.checkout), "ref": "v1", "commit": repo.v1,
                               "new": [hit], "reopened": [], "gone": [], "open": 1, "note": ""})
@@ -247,15 +247,35 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(self.node.events["cve.scanned"]["gone"], 1)
         self.assertNotIn("0.103.99", {v for _, _, v in self.asked})             # never the working tree
 
+    def test_one_project_that_can_t_be_read_doesn_t_stop_the_others(self):
+        repo = Repo(self.dir / "app" / "repo")
+        self.url = self.osv()
+        self.scanning({"key": "MB", "repo": str(repo.checkout), "ref": "v1"},
+                      {"key": "PFE", "repo": str(repo.checkout), "ref": "origin/nope"})
+        got = self.run_command("cve.scan", {})
+        self.assertEqual({k: got[k] for k in ("new", "reopened", "gone", "open", "failed")},
+                         {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 1})
+        mb, pfe = got["projects"]
+        self.assertEqual((mb["commit"], [h["advisory"] for h in mb["new"]]), (repo.v1, ["CVE-2026-9999"]))
+        why = f"origin/nope isn't a branch, tag or commit in {repo.checkout}"
+        self.assertEqual(pfe, {"project": "PFE", "repo": str(repo.checkout), "ref": "origin/nope", "error": why})
+        self.assertTrue(got["text"].startswith("Scanned MB, PFE: 1 new, 0 reopened, 0 gone, 1 open, 1 failed."),
+                        got["text"])
+        self.assertIn(f"**PFE** couldn't be scanned: {why}.", got["text"])
+        event = self.node.events["cve.scanned"]
+        self.assertEqual((event["failed"], event["new"]), (1, 1))
+        self.assertEqual(event["projects"][1], {"project": "PFE", "ref": "origin/nope", "error": why})
+        self.assertIn("impacts/mb/cve-2026-9999.toml", self.files.versions)
+
     def test_scan_refusals_say_what_to_do(self):
         self.assertIn("no projects to scan: add them to the projects setting", self.refused("cve.scan", {}))
         self.url = ""
         self.scanning({"key": "MB", "repo": str(self.dir / "app")})
         self.assertIn("XYZ isn't in the projects setting (MB)", self.refused("cve.scan", {"project": "xyz"}))
-        self.scanning({"key": "MB", "repo": "/etc"})
-        self.assertIn("MB: /etc is outside the folders", self.refused("cve.scan", {}))
-        self.scanning({"key": "MB", "repo": str(self.dir / "app" / "gone")})
-        self.assertIn("isn't a folder on mac-test", self.refused("cve.scan", {}))
+        self.scanning({"key": "MB", "repo": "/etc"}, {"key": "PFE", "repo": str(self.dir / "app" / "gone")})
+        said = self.refused("cve.scan", {})                     # every project failed: only then is it refused
+        self.assertIn("no project could be scanned: MB: /etc is outside the folders", said)
+        self.assertIn(f"PFE: {self.dir / 'app' / 'gone'} isn't a folder on mac-test", said)
         self.scanning({"key": "my project", "repo": str(self.dir / "app")})
         self.assertIn("the projects setting: projects #1: key is a project's key", self.refused("cve.scan", {}))
 

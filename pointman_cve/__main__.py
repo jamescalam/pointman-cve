@@ -129,17 +129,15 @@ def check(job):
 
 
 def scan_project(p: repos.Project, b: Book) -> dict:
-    """One project, read from git at its ref (fetched first), or its folder as files when it isn't in git."""
+    """One project, read from git at its ref (fetched first), or its folder as files when it isn't in git. One
+    that can't be read (not allowed, not there, a ref or git that fails) answers its `error`, and the scan goes on."""
     try:
         folder = ext.allowed(p.repo)
-    except PermissionError as e:
-        raise Refused(f"{p.key}: {e}") from None
-    if not folder.is_dir():
-        raise Refused(f"{p.key}: {p.repo} isn't a folder on {machine()}")
-    try:
+        if not folder.is_dir():
+            raise ValueError(f"{p.repo} isn't a folder on {machine()}")
         got = repos.read(p, folder)
-    except (ValueError, repos.GitFailed) as e:
-        raise Refused(f"{p.key}: {e}") from None
+    except (OSError, ValueError, repos.GitFailed) as e:
+        return {"project": p.key, "repo": p.repo, "ref": p.ref, "error": str(e)}
     try:
         found = scans.advisories(feeds, got.where, log=ext.log)
     except ValueError as e:          # OSV wasn't answering: no answer isn't taken to mean every record has gone
@@ -167,14 +165,17 @@ def scan(job):
     for n, p in enumerate(projects):
         job.progress(n / len(projects), f"{p.key} at {p.ref}")
         found.append(scan_project(p, b))
+    if all("error" in f for f in found):
+        raise Refused("no project could be scanned: " + "; ".join(f"{f['project']}: {f['error']}" for f in found))
     all_ = scans.totals(found)
     text = scans.text(found, all_)
     for f in found:
-        del f["files"], f["opened"]
-    ext.event("cve.scanned", {"scanned": now(), **all_,
-                              "projects": [{"project": f["project"], "ref": f["ref"], "commit": f["commit"],
-                                            **{k: len(f[k]) for k in ("new", "reopened", "gone")}, "open": f["open"]}
-                                           for f in found]})
+        f.pop("files", None)
+        f.pop("opened", None)
+    ext.event("cve.scanned", {"scanned": now(), **all_, "projects": [
+        {"project": f["project"], "ref": f["ref"], "error": f["error"]} if "error" in f else
+        {"project": f["project"], "ref": f["ref"], "commit": f["commit"],
+         **{k: len(f[k]) for k in ("new", "reopened", "gone")}, "open": f["open"]} for f in found]})
     return {"projects": found, **all_, "text": text}
 
 

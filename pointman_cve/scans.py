@@ -99,15 +99,21 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
 
 
 def totals(found: list[dict]) -> dict:
-    out = {k: sum(len(f[k]) for f in found) for k in ("new", "reopened", "gone")}
-    out["open"] = sum({f["project"]: f["open"] for f in found}.values())     # a key with two repos counts once
+    """The scan's counts over the projects it could read, and how many it couldn't (`failed`: those with an error)."""
+    read = [f for f in found if "error" not in f]
+    out = {k: sum(len(f[k]) for f in read) for k in ("new", "reopened", "gone")}
+    out["open"] = sum({f["project"]: f["open"] for f in read}.values())      # a key with two repos counts once
+    out["failed"] = len(found) - len(read)
     return out
 
 
 def text(found: list[dict], all_: dict) -> str:
     lines = [f"Scanned {', '.join(f['project'] for f in found)}: {all_['new']} new, {all_['reopened']} reopened, "
-             f"{all_['gone']} gone, {all_['open']} open."]
+             f"{all_['gone']} gone, {all_['open']} open" + (f", {all_['failed']} failed." if all_["failed"] else ".")]
     for f in found:
+        if "error" in f:
+            lines.append(f"\n**{f['project']}** couldn't be scanned: {f['error']}.")
+            continue
         at = f" at {f['ref']} ({f['commit'][:8]})" if f["commit"] else ""
         note = f" {f['note'][0].upper()}{f['note'][1:]}." if f["note"] else ""
         lines.append(f"\n**{f['project']}**{at}, {f['files']} lockfiles: {len(f['new'])} new, "
