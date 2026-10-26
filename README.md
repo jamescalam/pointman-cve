@@ -23,7 +23,15 @@ Keep up with security advisories, and keep a shared record of the ones that touc
 
   Tap a record to see where it hit, its evidence (PRs, threads, tasks) and its history, newest first. Everything is in rows, which read on a phone. Records change with `/cve set`, not in the pane.
 
-Agents run the same commands with `create_job` (`cve.scan`, `cve.recent`, `cve.check`, `cve.add`…). `pointman cve …` on the command line acts as the person, so it asks them to approve it, and agents shouldn't use it.
+Agents run the same commands with `create_job` (`cve.scan`, `cve.recent`, `cve.check`, `cve.add`…). The extension also gives every agent on its nodes a short guide, its behaviour (`SKILL.md`, details in `references/triage.md`):
+
+- triage fix-first, after checking the finding is really ours;
+- open one task per upgrade from `/cve plan`;
+- fix and release;
+- confirm with `/cve scan`, then mark records with evidence;
+- only mark a record not affected with VEX's justification and a note.
+
+`evals/` measures it against a fake finding. `pointman cve …` on the command line acts as the person, so it asks them to approve it, and agents shouldn't use it.
 
 ## Your records
 
