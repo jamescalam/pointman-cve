@@ -29,7 +29,7 @@ prs = ["https://github.com/pointman-ai/pointman/commit/7f5769fa"]
 threads = ["pointman://thread/17856"]
 tasks = ["MB-588"]
 
-[confirmed]                   # a scan found the version gone after it was marked fixed
+[confirmed."pointman-ai/pointman"]   # a scan of that repo found the version gone after it was marked fixed
 by = "cve scan on mac-m4 at origin/main (7f5769fa)"
 ref = "origin/main"
 commit = "7f5769fa…"
@@ -60,8 +60,8 @@ The statuses are VEX's (Vulnerability Exploitability eXchange), so the records c
 **Agents mark records; scans check them.** Marking a record `fixed` needs its evidence: `pr`, `commit` or `fixed_in` (`/cve set CVE-2026-1234 MB fixed pr=https://github.com/…`); without one, it's refused. Each scan then checks the fixed records it has a repo for:
 
 - **Still there:** the version is still pinned at the ref, so the fix hasn't reached it yet. It's listed as still there and left as it is.
-- **Confirmed:** the version has gone. The record is marked confirmed, once, with the scan, the ref, its commit and the time.
-- **Reopened:** the version is back after a scan confirmed it gone. The record turns `affected` again, with a note. Its PRs stay, as its history.
+- **Confirmed:** the version has gone from that repo. The record is marked confirmed for it, once, with the scan, the ref, its commit and the time. A record found in several repos is confirmed once each of them is. One advisory found in another repo of the same project is the same record, which gains that repo's places.
+- **Reopened:** the version is back in a repo that confirmed it gone. The record turns `affected` again, with a note. Its PRs stay, as its history.
 
 An open record whose version has gone is listed as gone, and stays open until it's marked fixed with its evidence. Scans, `/cve check`, `/cve add` and `/cve set` run one at a time on a machine, so a scan never overwrites a change made while it runs.
 

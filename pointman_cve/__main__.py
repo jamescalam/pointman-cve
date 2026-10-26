@@ -410,14 +410,15 @@ def history(i: Impact, shown: int = 10) -> str:
 
 
 def confirmation(i: Impact) -> str:
-    """Whether a scan has checked a fixed record: confirmed at a ref, or not yet."""
+    """Whether scans have checked a fixed record: confirmed at each repo's ref, in some of its repos, or not yet."""
     if i.status != "fixed":
         return ""
-    c = i.confirmed
-    if not c:
+    if not i.confirmed:
         return ", not confirmed by a scan yet"
-    return f", confirmed at {c.get('ref') or 'its files'}" + (f" ({str(c.get('commit'))[:8]})" if c.get("commit") else "") \
-        + f" on {str(c.get('at'))[:10]}"
+    at = "; ".join(f"{repo} at {c.get('ref') or 'its files'}" + (f" ({str(c.get('commit'))[:8]})" if c.get("commit") else "")
+                   + f" on {str(c.get('at'))[:10]}" for repo, c in sorted(i.confirmed.items()))
+    left = sorted(i.repos - set(i.confirmed))
+    return f", confirmed in {at}" + (f"; not yet in {', '.join(left)}" if left else "")
 
 
 @ext.command("cve.show")

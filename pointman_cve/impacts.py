@@ -57,7 +57,7 @@ class Impact:
     tasks: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     where: list[dict] = field(default_factory=list)   # {repo, file, package, version, fixed_version}
-    confirmed: dict = field(default_factory=dict)     # fixed, and a scan found the version gone: {by, ref, commit, at}
+    confirmed: dict = field(default_factory=dict)     # fixed, and gone at a repo's ref: {repo: {by, ref, commit, at}}
     history: list[dict] = field(default_factory=list)  # each change: {at, by or by_said, status, was, why, evidence, …}
 
     def log(self, by: str, why: str = "", evidence: list[str] | None = None, was: str = "", said: bool = False) -> None:
@@ -73,6 +73,16 @@ class Impact:
         if evidence:
             entry["evidence"] = list(evidence)
         self.history.append(entry)
+
+    @property
+    def repos(self) -> set[str]:
+        """The repos it was found in."""
+        return {str(w["repo"]) for w in self.where if w.get("repo")}
+
+    @property
+    def confirmed_everywhere(self) -> bool:
+        """Fixed, and a scan has found its version gone in every repo it was found in."""
+        return bool(self.repos) and self.repos <= set(self.confirmed)
 
     @property
     def path(self) -> str:
@@ -103,8 +113,8 @@ class Impact:
         for key in ("advisory", "title", "project", "status", "justification", "severity", "found", "found_by",
                     "fixed", "fixed_in", "prs", "threads", "tasks", "notes"):
             lines.append(f"{key} = {value(getattr(self, key))}")
-        if self.confirmed:
-            lines += ["", "[confirmed]"] + [f"{k} = {value(v)}" for k, v in self.confirmed.items() if v not in (None, "")]
+        for repo, c in self.confirmed.items():
+            lines += ["", f"[confirmed.{value(repo)}]"] + [f"{k} = {value(v)}" for k, v in c.items() if v not in (None, "")]
         for w in self.where:
             lines += ["", "[[where]]"] + [f"{k} = {value(v)}" for k, v in w.items() if v not in (None, "")]
         for h in self.history:

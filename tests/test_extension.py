@@ -352,7 +352,7 @@ class ExtensionTests(unittest.TestCase):
         got = self.run_command("cve.scan", {})
         self.assertEqual((got["projects"][0]["confirmed"], got["confirmed"]), (["CVE-2026-9999"], 1))
         self.assertEqual(self.node.events["cve.scanned"]["projects"][0]["confirmed"], 1)
-        self.assertIn(f"MB: fixed, confirmed at origin/main ({repo.v2[:8]}) on 20",
+        self.assertIn(f"MB: fixed, confirmed in repo/origin at origin/main ({repo.v2[:8]}) on 20",
                       self.run_command("cve.impacts", {"project": "MB"})["text"])
 
     def test_scan_refusals_say_what_to_do(self):
