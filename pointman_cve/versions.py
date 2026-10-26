@@ -16,18 +16,25 @@ END = (1,)                      # where a version stops: after its pre-releases,
 
 def key(version: str) -> tuple:
     """A version as a tuple that sorts as versions do: its release numbers (trailing zeros dropped, so 1.0 equals
-    1.0.0), then what follows them: a pre-release word before the release itself, a post-release word after."""
+    1.0.0), then what follows them: a pre-release before the release itself, a post-release word after. In semver
+    the release ends at its hyphen, and whatever follows is a pre-release: 2.0.0-1 and 1.0.0-0.3.7 come before
+    2.0.0 and 1.0.0, as npm's `7.0.0-0` comes before 7.0.0."""
     v = str(version).strip().lower().removeprefix("v").split("+", 1)[0]
-    tokens = re.findall(r"\d+|[a-z]+", v)
-    n = next((i for i, t in enumerate(tokens) if not t.isdigit()), len(tokens))
-    release = [int(t) for t in tokens[:n]]
+    head, hyphen, tail = v.partition("-")
+    if hyphen and re.fullmatch(r"[\d.]+", head):
+        release_tokens, rest_tokens = re.findall(r"\d+", head), re.findall(r"\d+|[a-z]+", tail)
+    else:
+        tokens = re.findall(r"\d+|[a-z]+", v)
+        n = next((i for i, t in enumerate(tokens) if not t.isdigit()), len(tokens))
+        release_tokens, rest_tokens, hyphen = tokens[:n], tokens[n:], ""
+    release = [int(t) for t in release_tokens]
     while release and release[-1] == 0:
         release.pop()
-    hyphen = bool(re.match(r"[\d.]*\d-", v))   # semver: whatever follows the hyphen is a pre-release
     rest = []
-    for token in tokens[n:]:
+    for i, token in enumerate(rest_tokens):
         if token.isdigit():
-            rest.append((3, int(token)))
+            # a numeric first identifier after the hyphen is the lowest pre-release (semver's numbers before words)
+            rest.append((0, -1, int(token)) if hyphen and i == 0 else (3, int(token)))
         elif token in PRE:
             rest.append((0, PRE[token]))
         elif token in POST:
