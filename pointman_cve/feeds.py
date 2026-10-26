@@ -101,12 +101,21 @@ def from_github(a: dict) -> Advisory:
         pkgs.append({"ecosystem": p.get("ecosystem") or "", "name": p.get("name") or "",
                      "vulnerable": v.get("vulnerable_version_range") or "",
                      "fixed": v.get("first_patched_version") or ""})
-    cvss = (a.get("cvss") or {}).get("score")
+    score, vector = github_score(a)
     return Advisory(id=a.get("ghsa_id") or "", aliases=[a["cve_id"]] if a.get("cve_id") else [],
                     summary=a.get("summary") or "", severity=a.get("severity") or "unknown",
                     published=a.get("published_at") or "", url=a.get("html_url") or "",
-                    kind=a.get("type") or "reviewed", packages=pkgs,
-                    score=cvss if isinstance(cvss, (int, float)) else None)
+                    kind=a.get("type") or "reviewed", packages=pkgs, score=score, cvss=vector)
+
+
+def github_score(a: dict) -> tuple[float | None, str]:
+    """GitHub's CVSS base score and vector: CVSS 3's, else 4.0's (GitHub scores 4.0 itself), else the older `cvss`
+    field, which is empty for advisories with only a 4.0 vector. A 0 with no vector is GitHub's "none"."""
+    both = a.get("cvss_severities") or {}
+    for c in (both.get("cvss_v3"), both.get("cvss_v4"), a.get("cvss")):
+        if isinstance(c, dict) and isinstance(c.get("score"), (int, float)) and (c["score"] or c.get("vector_string")):
+            return float(c["score"]), str(c.get("vector_string") or "")
+    return None, ""
 
 
 def from_osv(v: dict) -> Advisory:

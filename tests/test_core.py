@@ -179,6 +179,15 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(o.ids(), ["CVE-2026-9999", "GHSA-xxxx-yyyy-zzzz"])
         self.assertEqual((o.severity, o.packages[0]["ecosystem"], o.packages[0]["fixed"]), ("medium", "rust", "0.103.16"))
 
+    def test_github_s_score_for_a_4_0_only_advisory(self):
+        """A real one: GitHub scores CVSS 4.0 itself, in cvss_severities; the older cvss field is empty."""
+        a = from_github(json.loads((FIXTURES / "github" / "GHSA-xmj3-9gf7-h52w.json").read_text()))
+        self.assertEqual((a.severity, a.score, a.cvss[:8]), ("low", 1.0, "CVSS:4.0"))
+        both = {"cvss_severities": {"cvss_v3": {"vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                                                "score": 7.5}, "cvss_v4": {"vector_string": "CVSS:4.0/x", "score": 8.7}}}
+        self.assertEqual(from_github(both).score, 7.5)                          # CVSS 3 first, as OSV's is
+        self.assertEqual(from_github({"cvss_severities": {"cvss_v3": {"score": 0, "vector_string": None}}}).score, None)
+
     def test_recent_asks_once_and_caches(self):
         calls = []
 

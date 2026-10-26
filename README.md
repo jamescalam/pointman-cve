@@ -62,7 +62,7 @@ Open records, and each scan's new and reopened hits, are sorted in this order:
 3. **Severity:** critical, high, medium, low, unknown.
 4. **CVSS:** the higher base score.
 
-Both lists are by CVE id, so an advisory with no CVE (many RUSTSEC ones) isn't in KEV and has no EPSS. Each is fetched at most twice a day. If one can't be reached, the answer says so and the order falls back to severity. The CVSS score comes from OSV's CVSS 3.x vector. A RUSTSEC or PYSEC advisory that names no severity gets one from that score. A CVSS 4.0 vector isn't scored here, so its advisory's own severity stands.
+Both lists are by CVE id, so an advisory with no CVE (many RUSTSEC ones) isn't in KEV and has no EPSS. Each is fetched at most twice a day. If one can't be reached, the answer says so and the order falls back to severity. In `/cve recent`, the CVSS score is GitHub's: its CVSS 3 score, or its 4.0 score when that's all there is. In scans, it's computed from OSV's CVSS 3.x vector, and a RUSTSEC or PYSEC advisory that names no severity gets one from that score. A CVSS 4.0 vector from OSV isn't scored, so its advisory's own severity stands.
 
 The KEV catalog is CC0 and used as published; this extension isn't endorsed by CISA. EPSS scores are free to use, and FIRST asks for credit: answers that show them end with "EPSS scores: FIRST, https://www.first.org/epss".
 
