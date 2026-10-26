@@ -123,7 +123,7 @@ def read(p: Project, folder: Path) -> Read:
         if kind != "blob" or mode == "120000" or not lockfiles.wanted(path.removeprefix(prefix)):
             continue
         got.files.append(path)
-        for key in lockfiles.parse(path.rsplit("/", 1)[-1], git(folder, "show", f"{commit}:{path}")):
+        for key in lockfiles.parse(path, git(folder, "show", f"{commit}:{path}")):
             got.where.setdefault(key, []).append(path)
     return got
 
