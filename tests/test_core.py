@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from gitrepo import Repo, git
-from pointman_cve import cvss, feeds, lockfiles, repos, scans
+from pointman_cve import cvss, feeds, lockfiles, repos, scans, versions
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
 from pointman_cve.store import Book, DirStore, path_ok
@@ -560,6 +560,58 @@ class FixFirstTests(unittest.TestCase):
         self.assertEqual([r.advisory[0] for r in ordered][:4], ["CVE-2026-0001", "CVE-2026-0004", "GHSA-a", "CVE-2026-0002"])
         self.assertIn("offline", why)
         self.assertEqual(signals[records[0].path], (None, None))
+
+
+def osv_fixture(vid: str):
+    return from_osv(json.loads((FIXTURES / "osv" / f"{vid}.json").read_text()))
+
+
+def synthetic(vid: str, package: str, *events: list[dict]):
+    return from_osv({"id": vid, "affected": [{"package": {"ecosystem": "npm", "name": package},
+                                              "ranges": [{"type": "SEMVER", "events": list(e)} for e in events]}]})
+
+
+class PlanTests(unittest.TestCase):
+    def test_versions_sort_as_versions_do(self):
+        ordered = ["0.0.0-0", "0.1", "1.0.dev0", "1.0a1", "1.0-beta", "1.0rc1", "1.0.0-rc.2", "1.0", "1.0.post1",
+                   "1.0.1", "v1.9", "1.10", "2.0.0-next.5", "2.0.0"]
+        for a, b in zip(ordered, ordered[1:]):
+            self.assertTrue(versions.less(a, b) and not versions.less(b, a), (a, b))
+        self.assertEqual(versions.key("v4.4.0"), versions.key("4.4.0.0"))
+
+    def test_the_fix_is_the_one_for_the_pinned_version_s_line(self):
+        """Real advisories: undici's has a range a release line; 7.30.0 is fixed in 7.30.1, not 6.29.1."""
+        undici, tokio = osv_fixture("GHSA-xjj6-f33q-929c"), osv_fixture("RUSTSEC-2026-0386")
+        self.assertEqual([scans.fixed_for(undici, "undici", v) for v in ("6.25.0", "7.30.0", "8.1.0")],
+                         ["6.29.1", "7.30.1", "8.12.2"])
+        self.assertEqual([scans.fixed_for(tokio, "tokio", v) for v in ("1.50.0", "1.53.2")], ["1.51.6", "1.53.3"])
+        self.assertFalse(versions.affected([p for p in tokio.packages if p["name"] == "tokio"], "1.53.3"))
+        open_ended = synthetic("GHSA-open", "x", [{"introduced": "1.0.0"}, {"last_affected": "1.4.0"}])
+        self.assertEqual(scans.fixed_for(open_ended, "x", "1.2.0"), "")       # no fix named
+
+    def test_a_plan_takes_each_package_past_every_advisory_on_it(self):
+        undici = ("npm", "undici", "7.30.0")
+        later = synthetic("GHSA-later", "undici", [{"introduced": "7.0.0"}, {"fixed": "7.31.0"}])
+        back = synthetic("GHSA-back", "undici", [{"introduced": "7.0.0"}, {"fixed": "7.30.1"},
+                                                 {"introduced": "7.31.0"}, {"fixed": "7.32.0"}])
+        none = synthetic("GHSA-none", "undici", [{"introduced": "7.0.0"}, {"last_affected": "7.40.0"}])
+        tokio = ("rust", "tokio", "1.53.2")
+        found = [(["GHSA-xjj6-f33q-929c"], osv_fixture("GHSA-xjj6-f33q-929c"), [undici]),
+                 (["GHSA-later"], later, [undici]), (["GHSA-back"], back, [undici]), (["GHSA-none"], none, [undici]),
+                 (["RUSTSEC-2026-0386"], osv_fixture("RUSTSEC-2026-0386"), [tokio]),
+                 (["GHSA-ours"], later, [("npm", "left-pad", "1.3.0")])]
+        records = [Impact(advisory=["GHSA-ours"], project="MB", status="not_affected", justification="not_reachable")]
+        where = {undici: ["web/package-lock.json"], tokio: ["node/Cargo.lock"]}
+        lines = scans.plan(found, records, where)
+        self.assertEqual([(x["package"], x["from"], x["to"], x["fixes"], x["unfixed"]) for x in lines],
+                         [("undici", "7.30.0", "7.31.0", 2, ["GHSA-back", "GHSA-none"]),   # 7.31.0 is back in one
+                          ("tokio", "1.53.2", "1.53.3", 1, [])])
+        self.assertEqual(lines[0]["files"], ["web/package-lock.json"])
+        self.assertEqual(scans.plan_text(lines), [
+            "Upgrade plan: 2 upgrades fix 3 of 5 advisories.",
+            "- npm undici 7.30.0 → 7.31.0: fixes 2 (2 not)",
+            "- rust tokio 1.53.2 → 1.53.3: fixes 1",
+            "No fix named yet for 2: GHSA-back, GHSA-none."])
 
 
 class ManifestTests(unittest.TestCase):

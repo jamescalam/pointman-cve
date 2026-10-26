@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
+from . import versions
 from .feeds import Advisory, Feeds, merge_aliases
 from .impacts import Impact
 from .repos import Read
@@ -93,8 +94,13 @@ def severity_of(a: Advisory | None) -> str:
     return a.severity if a and a.severity in ("critical", "high", "medium", "low") else "unknown"
 
 
-def fixed_for(a: Advisory | None, package: str) -> str:
-    return next((p["fixed"] for p in (a.packages if a else []) if p["name"] == package and p.get("fixed")), "")
+def fixed_for(a: Advisory | None, package: str, version: str = "") -> str:
+    """The lowest version that fixes this package at this version: the fix of the range it's in, not the
+    advisory's first (undici 7.30.0 is fixed in 7.30.1, not 6.29.1). "" when none is named."""
+    entries = [p for p in (a.packages if a else []) if p["name"] == package]
+    if version and any(p.get("ranges") or p.get("versions") for p in entries):
+        return versions.fixed_above(entries, version)
+    return next((p["fixed"] for p in entries if p.get("fixed")), "")      # GitHub's: one fix a package
 
 
 def opened(project: str, ids: list[str], a: Advisory | None, where: list[dict], by: str) -> Impact:
@@ -121,11 +127,11 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
     new, reopened, made, hit_ids = [], [], [], set()
     for ids, a, keys in found:
         hit_ids |= {i.upper() for i in ids}
-        rows = [hit(ids[0], e, n, v, severity_of(a), fixed_for(a, n), a) for e, n, v in keys]
+        rows = [hit(ids[0], e, n, v, severity_of(a), fixed_for(a, n, v), a) for e, n, v in keys]
         record = next((by_id[i.upper()] for i in ids if i.upper() in by_id), None)
         if record is None:
             imp = opened(key, ids, a, [{"repo": got.name, "file": f, "package": n, "version": v, "ecosystem": e,
-                                        "fixed_version": fixed_for(a, n)}
+                                        "fixed_version": fixed_for(a, n, v)}
                                        for e, n, v in keys for f in got.where[(e, n, v)][:3]], by)
             book.save(imp)
             records.append(imp)
@@ -143,7 +149,54 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
                          r.severity, str(w.get("fixed_version") or "")) for w in mine]
     return {"project": key, "repo": repo, "ref": got.ref, "commit": got.commit, "new": new, "reopened": reopened,
             "gone": gone, "open": sum(1 for r in records if r.status in OPEN), "note": got.note,
-            "files": len(got.files), "opened": made}
+            "plan": plan(found, records, got.where), "files": len(got.files), "opened": made}
+
+
+def plan(found: Found, records: list[Impact], where: dict[tuple, list[str]]) -> list[dict]:
+    """The upgrades that fix what a ref is hit by: a line a pinned (ecosystem, package, version), going `to` the
+    lowest version past every advisory on it, the ones that leaves behind (`fixes`, checked against each one's
+    ranges) and the ones it doesn't (`unfixed`: no fix named, or not known). Advisories recorded as
+    not_affected are left out. Most fixes first, then those with a known-exploited one."""
+    skip = {i.upper() for r in records if r.status == "not_affected" for i in r.advisory}
+    lines: dict[tuple, dict] = {}
+    for ids, a, keys in found:
+        if skip & {i.upper() for i in ids}:
+            continue
+        for e, n, v in keys:
+            line = lines.setdefault((e, n, v), {"ecosystem": e, "package": n, "from": v, "to": "", "fixes": 0,
+                                                "advisories": [], "unfixed": [], "kev": False,
+                                                "files": list(where.get((e, n, v), []))})
+            line["advisories"].append((ids[0], a))
+            line["kev"] = line["kev"] or bool(a and a.kev)
+    for (e, n, v), line in lines.items():
+        line["to"] = versions.highest([fixed_for(a, n, v) for _, a in line["advisories"]])
+        done = [aid for aid, a in line["advisories"] if line["to"] and a
+                and not versions.affected([p for p in a.packages if p["name"] == n], line["to"])]
+        line["unfixed"] = [aid for aid, _ in line["advisories"] if aid not in done]
+        line["advisories"], line["fixes"] = [aid for aid, _ in line["advisories"]], len(done)
+    return sorted(lines.values(), key=lambda x: (-x["fixes"], not x["kev"], x["ecosystem"], x["package"],
+                                                 versions.key(x["from"])))
+
+
+def plan_text(lines: list[dict], shown: int = SHOWN) -> list[str]:
+    """A plan in a few lines: its sum, an upgrade a line, and what no upgrade fixes yet."""
+    if not lines:
+        return []
+    all_ids = {i for x in lines for i in x["advisories"]}
+    stuck = {i for x in lines for i in x["unfixed"]}
+    ups = [x for x in lines if x["to"] and x["fixes"]]
+    n, total = len(ups), len(all_ids)
+    out = [f"Upgrade plan: {n} upgrade{'s fix' if n != 1 else ' fixes'} {len(all_ids - stuck)} of {total} "
+           f"advisor{'ies' if total != 1 else 'y'}."]
+    out += [f"- {x['ecosystem']} {x['package']} {x['from']} → {x['to']}: fixes {x['fixes']}"
+            + (", one known exploited" if x["kev"] else "")
+            + (f" ({len(x['unfixed'])} not)" if x["unfixed"] else "") for x in ups[:shown]]
+    if len(ups) > shown:
+        out.append(f"- …and {len(ups) - shown} more.")
+    if stuck:
+        out.append(f"No fix named yet for {len(stuck)}: " + ", ".join(sorted(stuck)[:8])
+                   + (", …" if len(stuck) > 8 else "") + ".")
+    return out
 
 
 def totals(found: list[dict]) -> dict:
@@ -173,6 +226,7 @@ def text(found: list[dict], all_: dict) -> str:
                   + (f", fixed in {h['fixed']}" if h["fixed"] else "") for kind, h in rows[:SHOWN]]
         if len(rows) > SHOWN:
             lines.append(f"- …and {len(rows) - SHOWN} more.")
+        lines += plan_text(f.get("plan") or [], shown=5)
         if f["opened"]:
             lines.append(f"Opened {len(f['opened'])} records in {f['project']} as investigating.")
     if any(h.get("epss") is not None for f in found for k in ("new", "reopened") for h in f.get(k, [])):
