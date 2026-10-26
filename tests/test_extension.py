@@ -231,7 +231,10 @@ class ExtensionTests(unittest.TestCase):
                          {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 0})
         mb, web = got["projects"]
         self.assertEqual(mb, {"project": "MB", "repo": str(repo.checkout), "ref": "v1", "commit": repo.v1,
-                              "new": [hit], "reopened": [], "gone": [], "open": 1, "note": ""})
+                              "new": [hit], "reopened": [], "gone": [], "open": 1, "note": "",
+                              "plan": [{"ecosystem": "rust", "package": "rustls-webpki", "from": "0.103.15",
+                                        "to": "0.103.16", "fixes": 1, "advisories": ["CVE-2026-9999"],
+                                        "unfixed": [], "kev": True, "files": ["node/Cargo.lock"]}]})
         self.assertEqual((web["ref"], web["commit"], web["new"], web["open"]), ("", "", [], 0))
         self.assertEqual(web["note"], "read as files, not from git: it isn't a git repo")
         self.assertTrue(got["text"].startswith("Scanned MB, WEB: 1 new, 0 reopened, 0 gone, 1 open."), got["text"])
@@ -240,6 +243,25 @@ class ExtensionTests(unittest.TestCase):
         self.assertTrue(got["text"].endswith("EPSS scores: FIRST, https://www.first.org/epss"), got["text"])
         listed = self.run_command("cve.impacts", {"project": "MB"})["text"]           # open ones fix-first
         self.assertIn("- **CVE-2026-9999** MB: investigating, known exploited, EPSS 42%", listed)
+        self.assertIn("Upgrade plan: 1 upgrade fixes 1 of 1 advisory.", got["text"])
+
+        planned = self.run_command("cve.plan", {"project": "mb"})                     # read again: nothing written
+        self.assertEqual(([(x["package"], x["from"], x["to"], x["fixes"]) for x in planned["plan"]], planned["upgrades"]),
+                         ([("rustls-webpki", "0.103.15", "0.103.16", 1)], 1))
+        self.assertEqual((planned["plan"][0]["repo"], planned["plan"][0]["commit"]), (str(repo.checkout), repo.v1))
+        self.assertTrue(planned["text"].startswith("**MB**: Upgrade plan: 1 upgrade fixes 1 of 1 advisory.\n"
+                                                   "- rust rustls-webpki 0.103.15 → 0.103.16: fixes 1, one known exploited"),
+                        planned["text"])
+        self.assertIn("which project?", self.refused("cve.plan", {}))
+        self.assertIn("PFE isn't", self.refused("cve.plan", {"project": "PFE"}))
+
+        kept = [k for k in self.files.versions if k.startswith("scans/mb/")]           # the last scan, for the pane
+        self.assertEqual(len(kept), 1, kept)
+        view = self.node.open_pane("cve", target={"view": "impacts", "project": "MB"})
+        self.assertEqual([b.name for b in view.blocks], ["h", "st", "t", "ph0", "p0"])
+        self.assertEqual(view.block("p0").chart.data.rows, [["rustls-webpki", "0.103.15", "0.103.16", 1]])
+        self.assertIn("at v1 (", view.block("ph0").text.heading.subtitle)
+        self.assertEqual(view.problems, [])
         record = self.files.versions["impacts/mb/cve-2026-9999.toml"]
         self.assertEqual(len(record), 1)
         self.assertIn('status = "investigating"', record[0])

@@ -14,6 +14,7 @@ Nothing runs on its own: a scan is asked for, by a person or a workflow that fol
 
 from __future__ import annotations
 
+import json
 import threading
 
 from pointman_extension import Extension, Refused, Retry
@@ -21,7 +22,7 @@ from pointman_extension_types import Block, Chart, Empty, Layout, PaneContent, P
 
 from . import lockfiles, repos, scans
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
-from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, thread_link
+from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, slug, thread_link
 from .store import Book, store_for
 
 SHOWN = 12                          # advisories a command's text lists
@@ -109,7 +110,7 @@ def check_folder(folder: str, project: str | None) -> dict:
                       "epss": a.epss if a else None, "cvss": a.score if a else None})
         if b is not None and not any(b.load(project, i) for i in ids):
             imp = scans.opened(project, ids, a, [{"file": f, "package": n, "version": v, "ecosystem": e,
-                                                  "fixed_version": scans.fixed_for(a, n)}
+                                                  "fixed_version": scans.fixed_for(a, n, v)}
                                                  for e, n, v in keys for f in where[(e, n, v)][:3]],
                                f"cve check on {machine()}")
             b.save(imp)
@@ -136,16 +137,20 @@ def check(job):
     return got
 
 
-def scan_project(p: repos.Project, b: Book) -> dict:
-    """One project, read from git at its ref (fetched first), or its folder as files when it isn't in git. One
-    that can't be read (not allowed, not there, a ref or git that fails) answers its `error`, and the scan goes on."""
+def read_project(p: repos.Project) -> repos.Read | str:
+    """One project, read from git at its ref (fetched first), or its folder as files when it isn't in git; or
+    why it couldn't be read (not allowed, not there, a ref or git that fails)."""
     try:
         folder = ext.allowed(p.repo)
         if not folder.is_dir():
             raise ValueError(f"{p.repo} isn't a folder on {machine()}")
-        got = repos.read(p, folder)
+        return repos.read(p, folder)
     except (OSError, ValueError, repos.GitFailed) as e:
-        return {"project": p.key, "repo": p.repo, "ref": p.ref, "error": str(e)}
+        return str(e)
+
+
+def found_at(p: repos.Project, got: repos.Read) -> scans.Found:
+    """The advisories that hit what a project pins, with their KEV and EPSS."""
     try:
         found = scans.advisories(feeds, got.where, log=ext.log)
     except ValueError as e:          # OSV wasn't answering: no answer isn't taken to mean every record has gone
@@ -153,8 +158,58 @@ def scan_project(p: repos.Project, b: Book) -> dict:
     why = scans.signal(feeds, found)
     if why:                          # KEV and EPSS add to the scan: without them it goes on, in severity order
         got.note = "; ".join(x for x in (got.note, f"known-exploited and EPSS couldn't be had ({why})") if x)
+    return found
+
+
+def last_scan(project: str, repo: str) -> str:
+    """Where a project's repo's last scan is kept, beside the records: what the pane shows of it."""
+    return f"scans/{project.lower()}/{slug(repo)}.json"
+
+
+def scan_project(p: repos.Project, b: Book) -> dict:
+    """One project's scan; one that can't be read answers its `error`, and the scan goes on."""
+    got = read_project(p)
+    if isinstance(got, str):
+        return {"project": p.key, "repo": p.repo, "ref": p.ref, "error": got}
+    found = found_at(p, got)
     by = f"cve scan on {machine()}" + (f" at {got.ref} ({got.commit[:8]})" if got.commit else "")
-    return scans.scan(p.key, p.repo, got, found, b, by)
+    done = scans.scan(p.key, p.repo, got, found, b, by)
+    b.store.put(last_scan(p.key, p.repo), json.dumps({
+        "project": p.key, "repo": p.repo, "ref": got.ref, "commit": got.commit, "scanned": now(), "open": done["open"],
+        **{k: len(done[k]) for k in ("new", "reopened", "gone")}, "plan": done["plan"]}, indent=1))
+    return done
+
+
+@ext.command("cve.plan")
+def plan(job):
+    """A project's upgrade plan at its refs: the fewest upgrades that fix the most. It reads; it records nothing."""
+    key = str(job.params.get("project") or "").strip().upper()
+    try:
+        projects = [p for p in repos.from_settings(ext.settings.get("projects") or []) if p.key == key]
+    except ValueError as e:
+        raise Refused(f"the projects setting: {e}") from None
+    if not key or not projects:
+        raise Refused("which project? /cve plan <key>, one in the projects setting" + (f" ({key} isn't)" if key else ""))
+    records = book().all(key)
+    lines, notes, read = [], [], 0
+    for p in projects:
+        got = read_project(p)
+        if isinstance(got, str):
+            notes.append(f"{p.repo} couldn't be read: {got}")
+            continue
+        read += 1
+        for line in scans.plan(found_at(p, got), records, got.where):
+            lines.append({**line, "repo": p.repo, "ref": got.ref, "commit": got.commit})
+        if got.note:
+            notes.append(f"{p.repo}: {got.note}")
+    if not read:
+        raise Refused("; ".join(notes))
+    lines.sort(key=lambda x: (-x["fixes"], not x["kev"], x["ecosystem"], x["package"]))
+    stuck = sorted({i for x in lines for i in x["unfixed"]})
+    head = scans.plan_text(lines) or [f"Nothing to upgrade in {key}: no advisory hits what its refs pin."]
+    return {"project": key, "plan": lines, "upgrades": sum(1 for x in lines if x["to"] and x["fixes"]),
+            "fixes": len({i for x in lines for i in x["advisories"]} - set(stuck)), "unfixed": stuck,
+            "text": "\n".join([f"**{key}**: " + head[0], *head[1:], *notes])}
 
 
 @ext.command("cve.scan")
@@ -364,6 +419,23 @@ def recent_blocks(eco: str | None, days: int) -> list[Block]:
             if rows else empty("t", "Nothing new", "No advisories in that time.")]
 
 
+def plan_blocks(project: str) -> list[Block]:
+    """Each of a project's repos' upgrade plan, as its last scan left it."""
+    store, out = book().store, []
+    for n, f in enumerate(store.list(f"scans/{project.lower()}/")):
+        try:
+            last = json.loads(store.get(f["path"]) or "")
+        except ValueError:
+            continue
+        ups = [x for x in last.get("plan") or [] if x.get("to") and x.get("fixes")]
+        at = f"{last.get('ref')} ({str(last.get('commit'))[:8]})" if last.get("commit") else "its files"
+        out.append(heading(f"ph{n}", "Upgrade plan", f"{last.get('repo')} at {at}, scanned {str(last.get('scanned'))[:16]}"))
+        out.append(table(f"p{n}", ["Package", "From", "To", "Fixes"],
+                         [(f"{x['ecosystem']}:{x['package']}:{x['from']}", [x["package"], x["from"], x["to"], x["fixes"]])
+                          for x in ups]) if ups else empty(f"p{n}", "Nothing to upgrade", "No fix is named for what's open."))
+    return out
+
+
 def impact_blocks(project: str | None) -> list[Block]:
     found, _, _ = scans.fix_first(book().all(project), feeds)
     counts = {s: sum(1 for i in found if i.status == s) for s in STATUSES}
@@ -376,7 +448,8 @@ def impact_blocks(project: str | None) -> list[Block]:
     return [heading("h", "Our impacts", project or "every project"),
             Block(name="st", layout=Layout(stack=Layout.Stack(children=stats, horizontal=True))),
             table("t", ["Advisory", "Project", "Status", "Fixed in", "PR"], rows)
-            if rows else empty("t", "Nothing recorded yet", "/cve add <advisory> <project> records one.")]
+            if rows else empty("t", "Nothing recorded yet", "/cve add <advisory> <project> records one."),
+            *(plan_blocks(project) if project else [])]
 
 
 @ext.pane("cve")

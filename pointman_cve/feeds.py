@@ -124,7 +124,11 @@ def from_osv(v: dict) -> Advisory:
         p = aff.get("package") or {}
         fixed = [e["fixed"] for r in aff.get("ranges") or [] for e in r.get("events") or [] if "fixed" in e]
         pkgs.append({"ecosystem": GITHUB_ECOSYSTEM.get(p.get("ecosystem"), p.get("ecosystem") or ""),
-                     "name": p.get("name") or "", "vulnerable": "", "fixed": ", ".join(fixed)})
+                     "name": p.get("name") or "", "vulnerable": "", "fixed": ", ".join(fixed),
+                     # each version range's events, to place a pinned version in (a git range names commits)
+                     "ranges": [list(r.get("events") or []) for r in aff.get("ranges") or []
+                                if r.get("type") in ("ECOSYSTEM", "SEMVER")],
+                     "versions": list(aff.get("versions") or [])})
     vectors = [x for x in (v.get("severity") or []) + [x for aff in v.get("affected") or [] for x in aff.get("severity") or []]
                if isinstance(x, dict) and x.get("score")]
     v3 = next((x["score"] for x in vectors if x.get("type") == "CVSS_V3"), "")
