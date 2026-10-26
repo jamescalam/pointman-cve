@@ -27,13 +27,14 @@ class ImpactTests(unittest.TestCase):
 
     def test_a_record_round_trips_through_its_file(self):
         imp = self.emudhra()
-        imp.confirmed = {"by": "cve scan on mac-m4 at origin/main (7f5769fa)", "ref": "origin/main",
-                         "commit": "7f5769fa", "at": "2026-10-23T09:00:00Z"}
+        imp.confirmed = {"pointman-ai/pointman": {"by": "cve scan on mac-m4 at origin/main (7f5769fa)",
+                                                  "ref": "origin/main", "commit": "7f5769fa", "at": "2026-10-23T09:00:00Z"}}
         imp.check()
         text = imp.to_toml()
         self.assertIn('status = "fixed"', text)
         self.assertIn("[[where]]", text)
-        self.assertIn('[confirmed]\nby = "cve scan on mac-m4 at origin/main (7f5769fa)"', text)
+        self.assertIn('[confirmed."pointman-ai/pointman"]\nby = "cve scan on mac-m4 at origin/main (7f5769fa)"', text)
+        self.assertTrue(imp.confirmed_everywhere)                    # its one repo: pointman-ai/pointman
         self.assertEqual(Impact.from_toml(text), imp)
         self.assertEqual(imp.path, "impacts/mb/emudhra-g3-distrust.toml")
 
@@ -493,7 +494,7 @@ class ScanTests(unittest.TestCase):
 
         got = self.scan("origin/main")                         # gone at main: confirmed, with the scan's ref
         self.assertEqual((got["confirmed"], got["gone"], got["still"]), (["CVE-2026-9999"], [], []))
-        c = self.book.load("MB", "CVE-2026-9999").confirmed
+        c = self.book.load("MB", "CVE-2026-9999").confirmed["app/origin"]
         self.assertEqual((c["by"], c["ref"], c["commit"]), ("a test", "origin/main", self.repo.v2))
         self.assertTrue(c["at"].startswith("20"))
         self.assertEqual(self.scan("origin/main")["confirmed"], [])                # once: no new version
@@ -505,6 +506,31 @@ class ScanTests(unittest.TestCase):
         self.assertEqual((imp.status, imp.confirmed, imp.fixed, got["open"]), ("affected", {}, "", 1))
         self.assertIn("reopened by a test: rustls-webpki 0.103.15 is back (confirmed gone at origin/main", imp.notes[-1])
         self.assertEqual(imp.prs, ["https://github.com/x/app/pull/7"])           # the evidence stays, as history
+
+    def test_a_record_found_in_two_repos_is_confirmed_repo_by_repo(self):
+        other = Repo(self.dir / "web")                          # another repo of the same project, pinning the same
+        def scan(repo, ref):
+            p = repos.Project("MB", str(repo.checkout), ref)
+            got = repos.read(p, repo.checkout)
+            return scans.scan("MB", p.repo, got, scans.advisories(self.feeds, got.where), self.book, f"a test of {ref}")
+        self.assertEqual(len(scan(self.repo, "v1")["new"]), 1)
+        self.assertEqual(scan(other, "v1")["new"], [])           # the same advisory: the same record, both places
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual(imp.repos, {"app/origin", "web/origin"})
+        imp.status, imp.prs = "fixed", ["https://github.com/x/app/pull/7"]
+        self.book.save(imp)
+
+        self.assertEqual(scan(self.repo, "origin/main")["confirmed"], ["CVE-2026-9999"])   # gone in one of two
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual((set(imp.confirmed), imp.confirmed_everywhere, imp.status), ({"app/origin"}, False, "fixed"))
+        self.assertEqual(len(scan(other, "v1")["still"]), 1)                                # still there in the other
+        self.assertEqual(scan(other, "origin/main")["confirmed"], ["CVE-2026-9999"])        # and now gone there too
+        self.assertTrue(self.book.load("MB", "CVE-2026-9999").confirmed_everywhere)
+
+        back = scan(self.repo, "v1")                                                       # back in the first
+        self.assertEqual(len(back["reopened"]), 1)
+        imp = self.book.load("MB", "CVE-2026-9999")
+        self.assertEqual((imp.status, imp.confirmed), ("affected", {}))
 
     def test_a_record_kept_under_another_id_isn_t_new(self):
         self.book.save(Impact(advisory=["GHSA-xxxx-yyyy-zzzz"], project="MB", status="affected"))

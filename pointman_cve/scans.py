@@ -122,9 +122,10 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
     records; scans check them:
     - `new`: a record opened, investigating, for each advisory not recorded before (a line a version it hits);
     - `still`: records marked fixed whose version is still at the ref (the fix isn't there yet), left as they are;
-    - `confirmed`: records marked fixed whose versions have all gone from this repo: confirmed, once, with the
-      scan, ref, commit and time;
-    - `reopened`: confirmed records whose version is back: affected again, with a note;
+    - `confirmed`: records marked fixed whose versions have all gone from this repo: confirmed for this repo, once,
+      with the scan, ref, commit and time (a record is confirmed once every repo it was found in is);
+    - `reopened`: records confirmed for this repo whose version is back: affected again, with a note;
+    A record found here too, under an advisory recorded from another repo, gains this repo's places.
     - `gone`: open records from this repo that nothing hits any more, left open for an agent to mark fixed."""
     records = book.all(key)
     by_id = {i.upper(): r for r in records for i in r.advisory}
@@ -141,8 +142,13 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
             records.append(imp)
             made.append(imp.advisory[0])
             new += rows
-        elif record.status == "fixed" and record.confirmed:
-            was = record.confirmed
+            continue
+        if got.name not in record.repos and record.repos:     # one advisory, another repo: one record, both places
+            record.where += [{"repo": got.name, "file": f, "package": n, "version": v, "ecosystem": e,
+                              "fixed_version": fixed_for(a, n, v)} for e, n, v in keys for f in got.where[(e, n, v)][:3]]
+            book.save(record)
+        if record.status == "fixed" and got.name in record.confirmed:
+            was = record.confirmed[got.name]
             record.status, record.fixed, record.confirmed = "affected", "", {}
             record.notes.append(f"{now()[:10]}: reopened by {by}: "
                                 + ", ".join(f"{h['package']} {h['version']}" for h in rows)
@@ -161,8 +167,8 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
         if r.status in OPEN:
             gone += [hit(r.advisory[0], str(w.get("ecosystem") or ""), str(w["package"]), str(w.get("version") or ""),
                          r.severity, str(w.get("fixed_version") or "")) for w in mine]
-        elif r.status == "fixed" and not r.confirmed and all(w.get("repo") == got.name for w in r.where):
-            r.confirmed = {"by": by, "ref": got.ref, "commit": got.commit, "at": now()}   # only this repo has it
+        elif r.status == "fixed" and got.name not in r.confirmed:
+            r.confirmed[got.name] = {"by": by, "ref": got.ref, "commit": got.commit, "at": now()}
             book.save(r)
             confirmed.append(r.advisory[0])
     return {"project": key, "repo": repo, "ref": got.ref, "commit": got.commit, "new": new, "reopened": reopened,
