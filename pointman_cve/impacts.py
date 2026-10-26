@@ -52,6 +52,7 @@ class Impact:
     tasks: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     where: list[dict] = field(default_factory=list)   # {repo, file, package, version, fixed_version}
+    confirmed: dict = field(default_factory=dict)     # fixed, and a scan found the version gone: {by, ref, commit, at}
 
     @property
     def path(self) -> str:
@@ -82,6 +83,8 @@ class Impact:
         for key in ("advisory", "title", "project", "status", "justification", "severity", "found", "found_by",
                     "fixed", "fixed_in", "prs", "threads", "tasks", "notes"):
             lines.append(f"{key} = {value(getattr(self, key))}")
+        if self.confirmed:
+            lines += ["", "[confirmed]"] + [f"{k} = {value(v)}" for k, v in self.confirmed.items() if v not in (None, "")]
         for w in self.where:
             lines += ["", "[[where]]"] + [f"{k} = {value(v)}" for k, v in w.items() if v not in (None, "")]
         return "\n".join(lines) + "\n"

@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import versions
 from .feeds import Advisory, Feeds, merge_aliases
-from .impacts import Impact
+from .impacts import Impact, now
 from .repos import Read
 from .store import Book
 
@@ -118,13 +118,17 @@ def hit(advisory: str, ecosystem: str, package: str, version: str, severity: str
 
 
 def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> dict:
-    """One project's scan from what its ref pins (`got`) and the advisories that hit it (`found`): a record opened
-    for each advisory not recorded before (`new`, a line a version it hits), the fixed ones hit again
-    (`reopened`), and open records from this repo that nothing hits any more (`gone`). Records are only opened
-    here: what reopened and gone do to them is decided elsewhere."""
+    """One project's scan from what its ref pins (`got`) and the advisories that hit it (`found`). Agents mark
+    records; scans check them:
+    - `new`: a record opened, investigating, for each advisory not recorded before (a line a version it hits);
+    - `still`: records marked fixed whose version is still at the ref (the fix isn't there yet), left as they are;
+    - `confirmed`: records marked fixed whose versions have all gone from this repo: confirmed, once, with the
+      scan, ref, commit and time;
+    - `reopened`: confirmed records whose version is back: affected again, with a note;
+    - `gone`: open records from this repo that nothing hits any more, left open for an agent to mark fixed."""
     records = book.all(key)
     by_id = {i.upper(): r for r in records for i in r.advisory}
-    new, reopened, made, hit_ids = [], [], [], set()
+    new, reopened, still, made, hit_ids = [], [], [], [], set()
     for ids, a, keys in found:
         hit_ids |= {i.upper() for i in ids}
         rows = [hit(ids[0], e, n, v, severity_of(a), fixed_for(a, n, v), a) for e, n, v in keys]
@@ -137,19 +141,33 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
             records.append(imp)
             made.append(imp.advisory[0])
             new += rows
-        elif record.status == "fixed":
+        elif record.status == "fixed" and record.confirmed:
+            was = record.confirmed
+            record.status, record.fixed, record.confirmed = "affected", "", {}
+            record.notes.append(f"{now()[:10]}: reopened by {by}: "
+                                + ", ".join(f"{h['package']} {h['version']}" for h in rows)
+                                + f" is back (confirmed gone at {was.get('ref') or 'its files'} {str(was.get('commit'))[:8]})")
+            book.save(record)
             reopened += rows
-    for listed in (new, reopened):
+        elif record.status == "fixed":
+            still += rows
+    for listed in (new, reopened, still):
         listed.sort(key=lambda h: (first(h["kev"], h["epss"], h["severity"], h["cvss"]), h["advisory"]))
-    gone = []
+    gone, confirmed = [], []
     for r in records:
         mine = [w for w in r.where if w.get("repo") == got.name and w.get("package")]
-        if r.status in OPEN and mine and not hit_ids & {i.upper() for i in r.advisory}:
+        if not mine or hit_ids & {i.upper() for i in r.advisory}:
+            continue
+        if r.status in OPEN:
             gone += [hit(r.advisory[0], str(w.get("ecosystem") or ""), str(w["package"]), str(w.get("version") or ""),
                          r.severity, str(w.get("fixed_version") or "")) for w in mine]
+        elif r.status == "fixed" and not r.confirmed and all(w.get("repo") == got.name for w in r.where):
+            r.confirmed = {"by": by, "ref": got.ref, "commit": got.commit, "at": now()}   # only this repo has it
+            book.save(r)
+            confirmed.append(r.advisory[0])
     return {"project": key, "repo": repo, "ref": got.ref, "commit": got.commit, "new": new, "reopened": reopened,
-            "gone": gone, "open": sum(1 for r in records if r.status in OPEN), "note": got.note,
-            "plan": plan(found, records, got.where), "files": len(got.files), "opened": made}
+            "still": still, "confirmed": confirmed, "gone": gone, "open": sum(1 for r in records if r.status in OPEN),
+            "note": got.note, "plan": plan(found, records, got.where), "files": len(got.files), "opened": made}
 
 
 def plan(found: Found, records: list[Impact], where: dict[tuple, list[str]]) -> list[dict]:
@@ -202,7 +220,7 @@ def plan_text(lines: list[dict], shown: int = SHOWN) -> list[str]:
 def totals(found: list[dict]) -> dict:
     """The scan's counts over the projects it could read, and how many it couldn't (`failed`: those with an error)."""
     read = [f for f in found if "error" not in f]
-    out = {k: sum(len(f[k]) for f in read) for k in ("new", "reopened", "gone")}
+    out = {k: sum(len(f[k]) for f in read) for k in ("new", "reopened", "gone", "still", "confirmed")}
     out["open"] = sum({f["project"]: f["open"] for f in read}.values())      # a key with two repos counts once
     out["failed"] = len(found) - len(read)
     return out
@@ -219,13 +237,20 @@ def text(found: list[dict], all_: dict) -> str:
         note = f" {f['note'][0].upper()}{f['note'][1:]}." if f["note"] else ""
         lines.append(f"\n**{f['project']}**{at}, {f['files']} lockfiles: {len(f['new'])} new, "
                      f"{len(f['reopened'])} reopened, {len(f['gone'])} gone, {f['open']} open.{note}")
-        rows = [(kind, h) for kind in ("new", "reopened", "gone") for h in f[kind]]
+        rows = [(kind, h) for kind in ("new", "reopened", "still there", "gone") for h in f[kind.split()[0]]]
         lines += [f"- {kind}: **{h['advisory']}** ({h['severity']}"
                   + (f" {h['cvss']}" if h.get("cvss") is not None else "") + flags(h.get("kev"), h.get("epss"))
                   + f") {h['ecosystem']} {h['package']} {h['version']}"
                   + (f", fixed in {h['fixed']}" if h["fixed"] else "") for kind, h in rows[:SHOWN]]
         if len(rows) > SHOWN:
             lines.append(f"- …and {len(rows) - SHOWN} more.")
+        if f["confirmed"]:
+            lines.append(f"Confirmed fixed (the version has gone): {', '.join(f['confirmed'])}.")
+        if f["still"]:
+            lines.append("Marked fixed but still there (the fix isn't at this ref yet): "
+                         + ", ".join(sorted({h["advisory"] for h in f["still"]})) + ".")
+        if f["gone"]:
+            lines.append("Gone from this ref but still open: mark each fixed with its PR, commit or release.")
         lines += plan_text(f.get("plan") or [], shown=5)
         if f["opened"]:
             lines.append(f"Opened {len(f['opened'])} records in {f['project']} as investigating.")

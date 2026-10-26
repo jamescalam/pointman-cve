@@ -231,7 +231,8 @@ class ExtensionTests(unittest.TestCase):
                          {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 0})
         mb, web = got["projects"]
         self.assertEqual(mb, {"project": "MB", "repo": str(repo.checkout), "ref": "v1", "commit": repo.v1,
-                              "new": [hit], "reopened": [], "gone": [], "open": 1, "note": "",
+                              "new": [hit], "reopened": [], "still": [], "confirmed": [], "gone": [], "open": 1,
+                              "note": "",
                               "plan": [{"ecosystem": "rust", "package": "rustls-webpki", "from": "0.103.15",
                                         "to": "0.103.16", "fixes": 1, "advisories": ["CVE-2026-9999"],
                                         "unfixed": [], "kev": True, "files": ["node/Cargo.lock"]}]})
@@ -270,7 +271,7 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual({k: event[k] for k in ("new", "reopened", "gone", "open")},
                          {"new": 1, "reopened": 0, "gone": 0, "open": 1})
         self.assertEqual(event["projects"][0], {"project": "MB", "ref": "v1", "commit": repo.v1, "new": 1,
-                                                "reopened": 0, "gone": 0, "open": 1})
+                                                "reopened": 0, "gone": 0, "still": 0, "confirmed": 0, "open": 1})
 
         self.scanning({"key": "MB", "repo": str(repo.checkout)}, {"key": "WEB", "repo": str(self.dir / "app" / "web")})
         got = self.run_command("cve.scan", {"project": "mb"})                  # origin/main, after a fetch
@@ -301,6 +302,33 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual((event["failed"], event["new"]), (1, 1))
         self.assertEqual(event["projects"][1], {"project": "PFE", "ref": "origin/nope", "error": why})
         self.assertIn("impacts/mb/cve-2026-9999.toml", self.files.versions)
+
+    def test_fixed_needs_its_evidence_and_scans_check_it(self):
+        repo = Repo(self.dir / "app" / "repo")
+        self.url = self.osv()
+        self.scanning({"key": "MB", "repo": str(repo.checkout), "ref": "v1"})
+        self.run_command("cve.scan", {})
+        said = self.refused("cve.set", {"advisory": "CVE-2026-9999", "project": "MB", "status": "fixed"})
+        self.assertIn("fixed needs its evidence: pr=<link>, commit=<link> or fixed_in=<release>", said)
+        self.assertIn("fixed needs its evidence",
+                      self.refused("cve.add", {"advisory": "CVE-2026-1", "project": "MB", "status": "fixed"}))
+        self.assertNotIn("impacts/mb/cve-2026-1.toml", self.files.versions)          # nothing written
+        self.run_command("cve.set", {"advisory": "CVE-2026-9999", "project": "MB", "status": "fixed",
+                                     "commit": "https://github.com/x/app/commit/abc1234"})
+        self.assertIn('prs = ["https://github.com/x/app/commit/abc1234"]',
+                      self.files.versions["impacts/mb/cve-2026-9999.toml"][-1])
+        self.assertIn("MB: fixed, not confirmed by a scan yet", self.run_command("cve.show", {"advisory": "CVE-2026-9999"})["text"])
+
+        got = self.run_command("cve.scan", {})                                        # still at v1
+        self.assertEqual(([h["advisory"] for h in got["projects"][0]["still"]], got["still"]), (["CVE-2026-9999"], 1))
+        self.assertIn("Marked fixed but still there (the fix isn't at this ref yet): CVE-2026-9999.", got["text"])
+
+        self.scanning({"key": "MB", "repo": str(repo.checkout)})                       # origin/main: gone
+        got = self.run_command("cve.scan", {})
+        self.assertEqual((got["projects"][0]["confirmed"], got["confirmed"]), (["CVE-2026-9999"], 1))
+        self.assertEqual(self.node.events["cve.scanned"]["projects"][0]["confirmed"], 1)
+        self.assertIn(f"MB: fixed, confirmed at origin/main ({repo.v2[:8]}) on 20",
+                      self.run_command("cve.impacts", {"project": "MB"})["text"])
 
     def test_scan_refusals_say_what_to_do(self):
         self.assertIn("no projects to scan: add them to the projects setting", self.refused("cve.scan", {}))
