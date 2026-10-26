@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.3.0"
+version = "0.4.0"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"
@@ -32,7 +32,7 @@ items = { type = "object", required = ["key", "repo"], additionalProperties = fa
 [settings.properties.ecosystem]
 type = "string"
 title = "Ecosystem"
-description = "What /cve recent shows by default: all, rust, pip, go, npm, rubygems, maven, nuget, composer or swift."
+description = "What /cve recent shows by default: all, rust, pip, go, npm, rubygems, maven, nuget, composer, swift or actions."
 default = "all"
 
 [[commands]]

@@ -5,12 +5,17 @@
 - **Our versions and any one advisory:** OSV.dev (`api.osv.dev`), asked in one batch for every package and
   version our lockfiles pin, and then for each advisory it names. It covers CVE, GHSA, RUSTSEC, PYSEC and
   malicious-package ids, with no hourly limit: GitHub's 60 an hour are kept for the recent list.
+- **GitHub Actions** are the exception: OSV keeps their advisories but doesn't compare their versions (asked with
+  one, it finds nothing). Each action is asked by name alone, and its pinned tag is checked against each
+  advisory's ranges here.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -26,7 +31,8 @@ BATCH = 500              # OSV's querybatch limit is 1000
 
 # our ecosystem names (as GitHub's) → OSV's
 OSV_ECOSYSTEM = {"rust": "crates.io", "pip": "PyPI", "go": "Go", "npm": "npm", "rubygems": "RubyGems",
-                 "maven": "Maven", "nuget": "NuGet", "composer": "Packagist", "swift": "SwiftURL"}
+                 "maven": "Maven", "nuget": "NuGet", "composer": "Packagist", "swift": "SwiftURL",
+                 "actions": "GitHub Actions"}
 GITHUB_ECOSYSTEM = {v: k for k, v in OSV_ECOSYSTEM.items()}
 
 Fetch = Callable[[str, bytes | None], object]
@@ -158,7 +164,8 @@ class Feeds:
 
     def affecting(self, pinned: list[tuple[str, str, str]]) -> dict[tuple[str, str, str], list[str]]:
         """Which of (ecosystem, name, version) have advisories, by OSV id."""
-        out: dict[tuple[str, str, str], list[str]] = {}
+        out = self.actions_affected([k for k in pinned if k[0] == "actions"])
+        pinned = [k for k in pinned if k[0] != "actions"]
         for i in range(0, len(pinned), BATCH):
             chunk = pinned[i:i + BATCH]
             body = json.dumps({"queries": [{"package": {"ecosystem": OSV_ECOSYSTEM.get(e, e), "name": n}, "version": v}
@@ -169,3 +176,63 @@ class Feeds:
                 if ids:
                     out[key] = ids
         return out
+
+    def actions_affected(self, pinned: list[tuple[str, str, str]]) -> dict[tuple[str, str, str], list[str]]:
+        """affecting() for GitHub Actions: each action's advisories asked by its name alone, in one batch, and the
+        pinned tag checked against each one's ranges."""
+        names = sorted({n for _, n, _ in pinned})
+        ids: dict[str, list[str]] = {}
+        for i in range(0, len(names), BATCH):
+            chunk = names[i:i + BATCH]
+            body = json.dumps({"queries": [{"package": {"ecosystem": OSV_ECOSYSTEM["actions"], "name": n}}
+                                           for n in chunk]}).encode()
+            got = self.fetch(f"{OSV}/querybatch", body)
+            for n, res in zip(chunk, (got or {}).get("results") or [], strict=False):  # type: ignore[union-attr]
+                ids[n] = [v["id"] for v in (res or {}).get("vulns") or [] if isinstance(v, dict) and v.get("id")]
+        vulns: dict[str, dict] = {}
+        out: dict[tuple[str, str, str], list[str]] = {}
+        for key in pinned:
+            for vid in ids.get(key[1], []):
+                if vid not in vulns:
+                    got = self.fetch(f"{OSV}/vulns/{urllib.parse.quote(vid)}", None)
+                    vulns[vid] = got if isinstance(got, dict) else {}
+                if action_affected(vulns[vid], key[1], key[2]):
+                    out.setdefault(key, []).append(vid)
+        return out
+
+
+def tag(version: str, missing: float) -> tuple:
+    """A version as numbers to compare (v4.1.0 → 4, 1, 0), the parts it leaves out as `missing`."""
+    nums: list[float] = []
+    for part in version.strip().lstrip("vV").split(".")[:3]:
+        m = re.match(r"\d+", part)
+        if not m:
+            break
+        nums.append(int(m.group()))
+    return tuple(nums + [missing] * (3 - len(nums)))
+
+
+def action_affected(vuln: dict, name: str, version: str) -> bool:
+    """Whether an action pinned at a tag falls in an OSV advisory's ranges for it. A major tag (v4) moves with its
+    releases, so it counts as its newest: only a fix in a later major leaves it affected."""
+    v = tag(version, math.inf)
+    for aff in vuln.get("affected") or []:
+        pkg = aff.get("package") or {}
+        if pkg.get("ecosystem") != OSV_ECOSYSTEM["actions"] or str(pkg.get("name", "")).lower() != name.lower():
+            continue
+        if any(tag(x, 0) == v for x in aff.get("versions") or []):
+            return True
+        for r in aff.get("ranges") or []:
+            if r.get("type") not in ("ECOSYSTEM", "SEMVER"):
+                continue
+            hit = False
+            for e in r.get("events") or []:
+                if "introduced" in e and v >= tag(e["introduced"], 0):
+                    hit = True
+                elif "fixed" in e and v >= tag(e["fixed"], 0):
+                    hit = False
+                elif "last_affected" in e and v > tag(e["last_affected"], 0):
+                    hit = False
+            if hit:
+                return True
+    return False
