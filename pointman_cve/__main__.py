@@ -1,29 +1,26 @@
 """The CVE tracker's process: `python -m pointman_cve`, started and spoken to by the node.
 
 - `/cve recent [ecosystem] [days]`: advisories published lately, newest first, in a pane.
-- `/cve check [folder] [project]`: which advisories hit the versions a folder's lockfiles pin; with a
-  project, an impact is opened for each one not yet recorded.
+- `/cve scan [project]`: every project in the `projects` setting (or the one named), its lockfiles read from git
+  at its ref: an impact is opened for each new hit, and the answer says what's new, reopened, gone and open.
+- `/cve check <folder> [project]`: which advisories hit the versions a folder's lockfiles pin, as they are on disk;
+  with a project, an impact is opened for each one not yet recorded.
 - `/cve add <advisory> <project>`, `/cve set <advisory> <project> …`: our record of one that touched a project,
   with its status, where it hit, and the PRs, threads and tasks that dealt with it.
 - `/cve show <advisory>`, `/cve impacts [project]`: what we know, in a pane too.
-- Once a day (the `check_hours` setting), the `folders` setting is checked, and anything new is posted in
-  the `thread` setting's thread.
+
+Nothing runs on its own: a scan is asked for, by a person or a workflow that follows `cve.scanned`.
 """
 
 from __future__ import annotations
 
-import json
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
-import pointman_extension_types as types
-from pointman_extension import Extension, Refused
+from pointman_extension import Extension, Refused, Retry
 from pointman_extension_types import Block, Chart, Empty, Layout, PaneContent, PaneOpenResponse, Text, Tone
 
-from . import lockfiles
-from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds, merge_aliases
+from . import lockfiles, repos, scans
+from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
 from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, thread_link
 from .store import Book, store_for
 
@@ -87,80 +84,99 @@ def recent(job):
             "pane": {"open": "cve", "target": {"view": "recent", "ecosystem": eco or "all", "days": days}}}
 
 
-def scan(folders: list[str]) -> tuple[list[Path], dict[tuple, list[str]], dict[tuple, list[str]]]:
-    """Lockfiles under the folders, what each pins, and which pinned versions have advisories (OSV ids)."""
-    files, where = [], {}
-    for f in folders:
-        root = ext.allowed(f)
-        for lf in lockfiles.find(root):
-            files.append(lf)
-            for key in lockfiles.pinned(lf):
-                where.setdefault(key, []).append(str(lf))
-    hits = feeds.affecting(sorted(where)) if where else {}
-    return files, where, hits
-
-
 LOOK_UP = 40      # advisories a check looks up; the rest are listed by id
 
 
-def look_up(ids: list[str]) -> dict[str, Advisory | None]:
-    """Each advisory's details, a few at a time; one that can't be had is listed by its id alone."""
-    def one(aid: str) -> Advisory | None:
-        try:
-            return feeds.advisory(aid)
-        except ValueError as e:
-            ext.log(f"couldn't look up {aid}: {e}")
-            return None
-    with ThreadPoolExecutor(8) as pool:
-        return dict(zip(ids, pool.map(one, ids), strict=True))
-
-
-def check_folders(folders: list[str], project: str | None, by: str = "") -> dict:
-    files, where, hits = scan(folders)
+def check_folder(folder: str, project: str | None) -> dict:
+    root = ext.allowed(folder)
+    files, where = lockfiles.find(root), {}
+    for lf in files:
+        for key in lockfiles.pinned(lf):
+            where.setdefault(key, []).append(str(lf))
     if not files:
-        return {"text": f"No lockfiles under {', '.join(folders)} on {machine()}.", "found": [], "opened": []}
-    by_advisory: dict[str, list[tuple]] = {}
-    for key, ids in hits.items():
-        for i in ids:
-            by_advisory.setdefault(i, []).append(key)
-    details = look_up(list(by_advisory)[:LOOK_UP])
-    by_advisory = merge_aliases(by_advisory, details)
-    found, opened, lines = [], [], []
+        return {"text": f"No lockfiles under {folder} on {machine()}.", "found": [], "opened": []}
+    hits = scans.advisories(feeds, where, LOOK_UP, ext.log)
+    found, made, lines = [], [], []
     b = book() if project else None
-    for aid, keys in sorted(by_advisory.items()):
-        a = details.get(aid)
-        ids = a.ids() if a else [aid]
+    for ids, a, keys in hits:
         pkgs = "; ".join(f"{e} {n} {v}" for e, n, v in keys)
         lines.append(f"- **{ids[0]}** ({a.severity if a else 'unknown'}) {pkgs}"
                      + (f": {a.summary[:100]}" if a else ""))
         found.append({"advisory": ids, "packages": [list(k) for k in keys]})
         if b is not None and not any(b.load(project, i) for i in ids):
-            imp = Impact(advisory=ids, project=project.upper(), title=(a.summary[:200] if a else ""),
-                         severity=a.severity if a and a.severity in ("critical", "high", "medium", "low") else "unknown",
-                         found_by=by or f"cve check on {machine()}",
-                         where=[{"file": f, "package": n, "version": v, "ecosystem": e,
-                                 "fixed_version": next((p["fixed"] for p in (a.packages if a else [])
-                                                        if p["name"] == n and p.get("fixed")), "")}
-                                for e, n, v in keys for f in where[(e, n, v)][:3]])
+            imp = scans.opened(project, ids, a, [{"file": f, "package": n, "version": v, "ecosystem": e,
+                                                  "fixed_version": scans.fixed_for(a, n)}
+                                                 for e, n, v in keys for f in where[(e, n, v)][:3]],
+                               f"cve check on {machine()}")
             b.save(imp)
-            opened.append(imp.path)
+            made.append(imp.path)
     head = (f"{len(files)} lockfiles, {len(where)} pinned versions on {machine()}: "
-            + (f"{len(by_advisory)} advisories hit them." if by_advisory else "no advisory hits them."))
-    tail = f"\nOpened {len(opened)} impacts in {project.upper()} as investigating." if opened else ""
-    return {"text": head + ("\n" + "\n".join(lines) if lines else "") + tail, "found": found, "opened": opened}
+            + (f"{len(hits)} advisories hit them." if hits else "no advisory hits them."))
+    tail = f"\nOpened {len(made)} impacts in {project.upper()} as investigating." if made else ""
+    return {"text": head + ("\n" + "\n".join(lines) if lines else "") + tail, "found": found, "opened": made}
 
 
 @ext.command("cve.check")
 def check(job):
     folder = str(job.params.get("folder") or "").strip()
-    folders = [folder] if folder else split(ext.settings.get("folders"))
-    if not folders:
-        raise Refused("which folder? /cve check ~/Documents/project, or set this machine's folders setting")
+    if not folder:
+        raise Refused("which folder? /cve check ~/Documents/project (/cve scan reads the projects setting's repos)")
     project = str(job.params.get("project") or "").strip() or None
-    got = check_folders(folders, project)
+    got = check_folder(folder, project)
     if got["opened"]:
         got["pane"] = {"open": "cve", "target": {"view": "impacts", "project": project.upper()}}
     return got
+
+
+def scan_project(p: repos.Project, b: Book) -> dict:
+    """One project, read from git at its ref (fetched first), or its folder as files when it isn't in git. One
+    that can't be read (not allowed, not there, a ref or git that fails) answers its `error`, and the scan goes on."""
+    try:
+        folder = ext.allowed(p.repo)
+        if not folder.is_dir():
+            raise ValueError(f"{p.repo} isn't a folder on {machine()}")
+        got = repos.read(p, folder)
+    except (OSError, ValueError, repos.GitFailed) as e:
+        return {"project": p.key, "repo": p.repo, "ref": p.ref, "error": str(e)}
+    try:
+        found = scans.advisories(feeds, got.where, log=ext.log)
+    except ValueError as e:          # OSV wasn't answering: no answer isn't taken to mean every record has gone
+        raise Retry(f"{p.key}: {e}") from None
+    by = f"cve scan on {machine()}" + (f" at {got.ref} ({got.commit[:8]})" if got.commit else "")
+    return scans.scan(p.key, p.repo, got, found, b, by)
+
+
+@ext.command("cve.scan")
+def scan(job):
+    """Every project in the projects setting, or the one named: its lockfiles at its ref, against OSV."""
+    try:
+        projects = repos.from_settings(ext.settings.get("projects") or [])
+    except ValueError as e:
+        raise Refused(f"the projects setting: {e}") from None
+    if not projects:
+        raise Refused("no projects to scan: add them to the projects setting, each a key (MB), a repo under "
+                      "~/Documents and a ref (origin/main); /cve check reads one folder")
+    named = str(job.params.get("project") or "").strip().upper()
+    if named and not any(p.key == named for p in projects):
+        raise Refused(f"{named} isn't in the projects setting ({', '.join(dict.fromkeys(p.key for p in projects))})")
+    projects = [p for p in projects if not named or p.key == named]
+    b = book()
+    found = []
+    for n, p in enumerate(projects):
+        job.progress(n / len(projects), f"{p.key} at {p.ref}")
+        found.append(scan_project(p, b))
+    if all("error" in f for f in found):
+        raise Refused("no project could be scanned: " + "; ".join(f"{f['project']}: {f['error']}" for f in found))
+    all_ = scans.totals(found)
+    text = scans.text(found, all_)
+    for f in found:
+        f.pop("files", None)
+        f.pop("opened", None)
+    ext.event("cve.scanned", {"scanned": now(), **all_, "projects": [
+        {"project": f["project"], "ref": f["ref"], "error": f["error"]} if "error" in f else
+        {"project": f["project"], "ref": f["ref"], "commit": f["commit"],
+         **{k: len(f[k]) for k in ("new", "reopened", "gone")}, "open": f["open"]} for f in found]})
+    return {"projects": found, **all_, "text": text}
 
 
 @ext.command("cve.add")
@@ -369,47 +385,6 @@ def open_pane(pane):
 
     return PaneOpenResponse(title=title, content=PaneContent(blocks=blocks))
 
-
-# ------------------------------------------------------------------ the daily check
-
-
-def state_file() -> Path:
-    return Path(str(ext.node.get("state_dir") or ".")) / "check.json"
-
-
-def daily() -> None:
-    folders = split(ext.settings.get("folders"))
-    hours = float(ext.settings.get("check_hours") or 24)
-    if not folders or hours <= 0:
-        return
-    f = state_file()
-    try:
-        state = json.loads(f.read_text())
-    except (OSError, ValueError):
-        state = {}
-    if time.time() - float(state.get("at") or 0) < hours * 3600:
-        return
-    project = str(ext.settings.get("project") or "").strip() or None
-    try:
-        got = check_folders(folders, project)
-    except (ValueError, RuntimeError, PermissionError) as e:
-        ext.log(f"daily check: {e}")
-        return
-    seen = set(state.get("seen") or [])
-    new = [x for x in got["found"] if x["advisory"][0] not in seen]
-    state = {"at": time.time(), "seen": sorted(seen | {x["advisory"][0] for x in got["found"]})}
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(state))
-    ext.event("cve.status", {"checked": now(), "advisories": len(got["found"]), "new": len(new)})
-    thread = int(ext.settings.get("thread") or 0)
-    if new and thread:
-        ids = ", ".join(x["advisory"][0] for x in new[:10])
-        ext.request(types.BoardPostRequest(thread=types.ThreadId(value=f"thr_{thread}"),
-                                           text=f"New advisories hit {machine()}'s lockfiles: {ids}.\n\n"
-                                                + got["text"][:3500]))
-
-
-ext.every(600, daily, lane="check")
 
 if __name__ == "__main__":
     ext.run()

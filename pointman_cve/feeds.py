@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 GITHUB = "https://api.github.com/advisories"
-OSV = "https://api.osv.dev/v1"
+OSV = os.environ.get("CVE_OSV_URL") or "https://api.osv.dev/v1"       # CVE_OSV_URL: tests' stand-in OSV
 TIMEOUT = 20
 CACHE_FOR = 600          # seconds a recent list is reused
 BATCH = 500              # OSV's querybatch limit is 1000

@@ -2,15 +2,20 @@
 files (files.put, files.list, files.get) and no network (CVE_OFFLINE). Skipped where $POINTMAN_EXTENSIONS_SDK
 doesn't name the node's Python SDK (one with pointman_extension_types, the typed protocol)."""
 
+import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from gitrepo import Repo
 from pointman_cve.store import path_ok
+from test_core import OSV
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK = os.environ.get("POINTMAN_EXTENSIONS_SDK")
@@ -62,10 +67,10 @@ class ExtensionTests(unittest.TestCase):
         self.files = Files()
         self.node = self.start()
 
-    def start(self, settings=None, methods=None):
+    def start(self, settings=None, methods=None, env=None):
         """The extension under a stand-in node (with these settings, or its files' stand-in left out)."""
         node = StandInNode(ROOT, settings=settings, methods=self.files.methods() if methods is None else methods,
-                           env={"CVE_OFFLINE": "1"}, roots=[self.dir / "app"], machine="mac-test",
+                           env=env or {"CVE_OFFLINE": "1"}, roots=[self.dir / "app"], machine="mac-test",
                            state_dir=self.dir / "node")
         node.start()
         self.addCleanup(node.stop)
@@ -169,17 +174,117 @@ class ExtensionTests(unittest.TestCase):
         text = self.run_command("cve.show", {"advisory": "CVE-2026-1234"})["text"]
         self.assertIn("Our records aren't readable here: this node can't keep an extension's files yet", text)
 
-    def test_the_daily_check_says_when_it_looked(self):
-        (self.dir / "app" / "empty").mkdir()
+    def osv(self) -> str:
+        """A stand-in OSV over HTTP (test_core's OSV), for the extension's process: its URL."""
+        fake = OSV()
+
+        class Answer(BaseHTTPRequestHandler):
+            def reply(self, body):
+                try:
+                    got, code = fake.fetch(self.path, body), 200
+                except ValueError:
+                    got, code = {"code": 5, "message": "Bug not found."}, 404
+                data = json.dumps(got).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self.reply(None)
+
+            def do_POST(self):
+                self.reply(self.rfile.read(int(self.headers["Content-Length"])))
+
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Answer)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.asked = fake.asked
+        return f"http://127.0.0.1:{server.server_port}/v1"
+
+    def scanning(self, *projects):
         self.node.stop()
-        self.node = self.start(settings={"folders": [str(self.dir / "app" / "empty")], "thread": 17856})
-        for _ in range(200):
-            if "cve.status" in self.node.events:
-                break
-            time.sleep(0.05)
-        self.assertEqual({k: v for k, v in self.node.events.get("cve.status", {}).items() if k != "checked"},
-                         {"advisories": 0, "new": 0}, self.node.log)
-        self.assertNotIn("board.post", [m for m, _ in self.node.asked])     # nothing new: nothing posted
+        self.node = self.start(settings={"projects": list(projects)}, env={"CVE_OSV_URL": self.url})
+
+    def test_a_scan_opens_a_record_for_a_hit_at_one_ref_and_finds_it_gone_at_the_other(self):
+        repo = Repo(self.dir / "app" / "repo")
+        self.url = self.osv()
+        (self.dir / "app" / "web").mkdir()
+        shutil.copy(ROOT / "tests" / "fixtures" / "package-lock.json", self.dir / "app" / "web")
+        self.scanning({"key": "mb", "repo": str(repo.checkout), "ref": "v1"}, {"key": "WEB", "repo": str(self.dir / "app" / "web")})
+        got = self.run_command("cve.scan", {})
+        hit = {"advisory": "CVE-2026-9999", "package": "rustls-webpki", "version": "0.103.15", "ecosystem": "rust",
+               "severity": "medium", "fixed": "0.103.16"}
+        self.assertEqual({k: got[k] for k in ("new", "reopened", "gone", "open", "failed")},
+                         {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 0})
+        mb, web = got["projects"]
+        self.assertEqual(mb, {"project": "MB", "repo": str(repo.checkout), "ref": "v1", "commit": repo.v1,
+                              "new": [hit], "reopened": [], "gone": [], "open": 1, "note": ""})
+        self.assertEqual((web["ref"], web["commit"], web["new"], web["open"]), ("", "", [], 0))
+        self.assertEqual(web["note"], "read as files, not from git: it isn't a git repo")
+        self.assertTrue(got["text"].startswith("Scanned MB, WEB: 1 new, 0 reopened, 0 gone, 1 open."), got["text"])
+        self.assertIn("Read as files, not from git: it isn't a git repo.", got["text"])
+        record = self.files.versions["impacts/mb/cve-2026-9999.toml"]
+        self.assertEqual(len(record), 1)
+        self.assertIn('status = "investigating"', record[0])
+        self.assertIn(f'found_by = "cve scan on mac-test at v1 ({repo.v1[:8]})"', record[0])
+        event = self.node.events["cve.scanned"]
+        self.assertEqual({k: event[k] for k in ("new", "reopened", "gone", "open")},
+                         {"new": 1, "reopened": 0, "gone": 0, "open": 1})
+        self.assertEqual(event["projects"][0], {"project": "MB", "ref": "v1", "commit": repo.v1, "new": 1,
+                                                "reopened": 0, "gone": 0, "open": 1})
+
+        self.scanning({"key": "MB", "repo": str(repo.checkout)}, {"key": "WEB", "repo": str(self.dir / "app" / "web")})
+        got = self.run_command("cve.scan", {"project": "mb"})                  # origin/main, after a fetch
+        self.assertEqual([p["project"] for p in got["projects"]], ["MB"])
+        self.assertEqual((got["new"], got["gone"], got["open"]), (0, 1, 1))     # nothing new still answers
+        self.assertEqual((got["projects"][0]["commit"], got["projects"][0]["gone"]), (repo.v2, [hit]))
+        self.assertEqual(len(self.files.versions["impacts/mb/cve-2026-9999.toml"]), 1)      # left as it was
+        self.assertEqual(self.node.events["cve.scanned"]["gone"], 1)
+        self.assertNotIn("0.103.99", {v for _, _, v in self.asked})             # never the working tree
+
+    def test_one_project_that_can_t_be_read_doesn_t_stop_the_others(self):
+        repo = Repo(self.dir / "app" / "repo")
+        self.url = self.osv()
+        self.scanning({"key": "MB", "repo": str(repo.checkout), "ref": "v1"},
+                      {"key": "PFE", "repo": str(repo.checkout), "ref": "origin/nope"})
+        got = self.run_command("cve.scan", {})
+        self.assertEqual({k: got[k] for k in ("new", "reopened", "gone", "open", "failed")},
+                         {"new": 1, "reopened": 0, "gone": 0, "open": 1, "failed": 1})
+        mb, pfe = got["projects"]
+        self.assertEqual((mb["commit"], [h["advisory"] for h in mb["new"]]), (repo.v1, ["CVE-2026-9999"]))
+        why = f"origin/nope isn't a branch, tag or commit in {repo.checkout}"
+        self.assertEqual(pfe, {"project": "PFE", "repo": str(repo.checkout), "ref": "origin/nope", "error": why})
+        self.assertTrue(got["text"].startswith("Scanned MB, PFE: 1 new, 0 reopened, 0 gone, 1 open, 1 failed."),
+                        got["text"])
+        self.assertIn(f"**PFE** couldn't be scanned: {why}.", got["text"])
+        event = self.node.events["cve.scanned"]
+        self.assertEqual((event["failed"], event["new"]), (1, 1))
+        self.assertEqual(event["projects"][1], {"project": "PFE", "ref": "origin/nope", "error": why})
+        self.assertIn("impacts/mb/cve-2026-9999.toml", self.files.versions)
+
+    def test_scan_refusals_say_what_to_do(self):
+        self.assertIn("no projects to scan: add them to the projects setting", self.refused("cve.scan", {}))
+        self.url = ""
+        self.scanning({"key": "MB", "repo": str(self.dir / "app")})
+        self.assertIn("XYZ isn't in the projects setting (MB)", self.refused("cve.scan", {"project": "xyz"}))
+        self.scanning({"key": "MB", "repo": "/etc"}, {"key": "PFE", "repo": str(self.dir / "app" / "gone")})
+        said = self.refused("cve.scan", {})                     # every project failed: only then is it refused
+        self.assertIn("no project could be scanned: MB: /etc is outside the folders", said)
+        self.assertIn(f"PFE: {self.dir / 'app' / 'gone'} isn't a folder on mac-test", said)
+        self.scanning({"key": "my project", "repo": str(self.dir / "app")})
+        self.assertIn("the projects setting: projects #1: key is a project's key", self.refused("cve.scan", {}))
+
+    def test_nothing_scans_on_its_own(self):
+        self.url = ""
+        self.scanning({"key": "MB", "repo": str(self.dir / "app")})
+        time.sleep(1.5)
+        self.assertNotIn("cve.scanned", self.node.events)
+        self.assertEqual([m for m, _ in self.node.asked if m.startswith("files.")], [])
 
 
 if __name__ == "__main__":
