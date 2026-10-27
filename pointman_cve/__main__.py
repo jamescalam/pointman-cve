@@ -24,7 +24,7 @@ from pointman_extension import Extension, Refused, Retry
 from pointman_extension_types import (Block, Chart, Empty, Input, Layout, List, PaneContent, PaneOpenResponse, Text,
                                       Tone)
 
-from . import lockfiles, repos, scans, vex
+from . import lockfiles, report, repos, scans, vex
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
 from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, slug, thread_link
 from .store import Book, store_for
@@ -449,6 +449,27 @@ def vex_cmd(job):
     said = ", ".join(f"{n} {status.replace('_', ' ')}" for status, n in sorted(counts.items()))
     return {"text": f"OpenVEX for {project}: {len(doc['statements'])} statements ({said}), posted as {path.name}.",
             "file": path.name, "id": doc["@id"], "statements": len(doc["statements"]), "counts": dict(counts)}
+
+
+@ext.command("cve.report")
+def report_cmd(job):
+    """Every open record a PR fixes, by project and PR, as a page posted with the answer: for whoever reviews and
+    merges the PRs. It reads the records; it changes nothing."""
+    keys = [k.upper() for k in split(job.params.get("project"))]
+    b = book()
+    records = [r for k in keys for r in b.all(k)] if keys else b.all()
+    if not any(r.status in scans.OPEN for r in records):
+        raise Refused("nothing is open" + (f" in {', '.join(keys)}" if keys else "") + ", so there's nothing to report")
+    _, signals, why = scans.fix_first(records, feeds)
+    data = report.build(records, signals, now(), keys or None)
+    page = report.html(data, signals, str(job.params.get("title") or "").strip())
+    path = Path(job.work) / f"cve-report-{now()[:10]}.html"
+    path.write_text(page, encoding="utf-8")
+    job.output(path, kind="document", meta={"title": "CVE fix report", "file": path.stem})
+    note = f"\nKnown-exploited and EPSS couldn't be had ({why})." if why else ""
+    return {"text": report.text(data) + f"\nPosted as {path.name}." + note, "file": path.name,
+            **{k: data[k] for k in ("prs", "open", "fixed_by_prs", "kev", "without_pr")},
+            "projects": [{k: v for k, v in p.items() if not k.startswith("_")} for p in data["projects"]]}
 
 
 @ext.command("cve.show")
