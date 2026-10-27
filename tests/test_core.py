@@ -469,6 +469,14 @@ class ReportTests(unittest.TestCase):
         self.assertIn("&lt;script&gt; 1 → 2", page)
         self.assertIn("<h1>A &amp; B</h1>", page)
 
+    def test_only_an_https_pr_is_a_link(self):
+        rec = Impact(advisory=["CVE-2026-9"], project="APP", prs=["javascript:alert(1)"],
+                     where=[{"package": "zstd", "version": "0.13.3", "fixed_version": "0.14.3"}])
+        page = report.html(report.build([rec], {}, "2026-10-27T15:00:00Z"), {})
+        self.assertNotIn('href="javascript:', page)
+        self.assertIn('<th scope="row">javascript:alert(1)</th>', page)
+        self.assertIn("<p>javascript:alert(1)</p>", page)
+
 
 class OSV:
     """A stand-in OSV: rustls-webpki 0.103.15 has OSV_VULN (GHSA-xxxx-yyyy-zzzz, CVE-2026-9999); nothing else has

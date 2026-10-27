@@ -37,6 +37,12 @@ def upgrades(r: Impact) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def pr_link(link: str) -> str:
+    """A PR as a link, only when it's an https:// one (records come from agents): anything else as plain text."""
+    name = escape(pr_name(link))
+    return f'<a href="{escape(link)}">{name}</a>' if link.startswith("https://") else name
+
+
 def worst(records: list[Impact]) -> str:
     return min((r.severity for r in records), key=lambda s: RANK.get(s, 9), default="unknown")
 
@@ -143,14 +149,14 @@ def project_section(p: dict, signals: dict[str, tuple]) -> list[str]:
             kev = sum(1 for r in rs if signals.get(r.path, (None,))[0])
             ups = list(dict.fromkeys(u for r in rs for u in upgrades(r)))
             shown = ", ".join(ups[:PACKAGES_SHOWN]) + (f" +{len(ups) - PACKAGES_SHOWN} more" if len(ups) > PACKAGES_SHOWN else "")
-            out.append(f'<tr><th scope="row"><a href="{escape(link)}">{escape(pr_name(link))}</a></th>'
+            out.append(f'<tr><th scope="row">{pr_link(link)}</th>'
                        f'<td class="num">{len(rs)}</td><td>{escape(worst(rs))}</td>'
                        + (f'<td class="down">{kev} known</td>' if kev else "<td>none</td>")
                        + f"<td>{escape(shown)}</td></tr>")
         out += ["</tbody>", "</table>", "</div>",
                 f'<details class="all-notes"><summary>Every advisory {escape(key)}\'s PRs fix</summary>']
         for link, rs in by_pr:
-            out.append(f'<p><a href="{escape(link)}">{escape(pr_name(link))}</a></p><ul class="plain">')
+            out.append(f'<p>{pr_link(link)}</p><ul class="plain">')
             out += [f'<li><a href="{escape(osv(r.advisory[0]))}">{escape(r.advisory[0])}</a> {escape(flags(r, signals))}'
                     f" · {escape(', '.join(upgrades(r)[:2]))}</li>" for r in rs]
             out.append("</ul>")
