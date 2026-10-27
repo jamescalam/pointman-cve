@@ -3,11 +3,12 @@ import shutil
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from gitrepo import Repo, git
 import schema
-from pointman_cve import cvss, feeds, lockfiles, repos, scans, versions, vex
+from pointman_cve import cvss, feeds, lockfiles, report, repos, scans, store, versions, vex
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
 from pointman_cve.store import Book, DirStore, path_ok
@@ -377,6 +378,104 @@ class BookTests(unittest.TestCase):
             self.assertEqual([i.advisory[0] for i in b.for_advisory(["ghsa-a"])], ["CVE-2026-1"])
             self.assertIsNone(b.load("MB", "CVE-2026-404"))
 
+
+
+class DroppedCallTests(unittest.TestCase):
+    """A call core dropped is asked again, twice, after a wait; a refusal never is."""
+
+    def store(self, answers):
+        s = object.__new__(store.Store)              # without the SDK's types: only _call is used
+        s.asked = []
+
+        def request(message):
+            s.asked.append(message)
+            got = answers.pop(0)
+            if isinstance(got, Exception):
+                raise got
+            return got
+        s.request = request
+        return s
+
+    def test_a_dropped_call_is_asked_again_after_a_wait(self):
+        lost = RuntimeError("core didn't answer GET /v1/node/extfiles/cve/impacts/ext/rustsec-2026-0347.toml: Lost")
+        s = self.store([lost, RuntimeError("the node didn't answer files.get"), "the file"])
+        with mock.patch.object(store.time, "sleep") as slept:
+            self.assertEqual(s._call("get"), "the file")
+        self.assertEqual(len(s.asked), 3)
+        self.assertEqual([c.args for c in slept.call_args_list], [(1.0,), (3.0,)])
+
+    def test_three_drops_in_a_row_fail_and_a_refusal_fails_at_once(self):
+        lost = RuntimeError("core didn't answer PUT /v1/node/extfiles/cve/x.toml: Lost")
+        s = self.store([lost, lost, lost])
+        with mock.patch.object(store.time, "sleep"), self.assertRaisesRegex(RuntimeError, "Lost"):
+            s._call("put")
+        self.assertEqual(len(s.asked), 3)
+        s = self.store([RuntimeError("no file impacts/mb/x.toml")])
+        with mock.patch.object(store.time, "sleep") as slept, self.assertRaisesRegex(RuntimeError, "no file"):
+            s._call("get")
+        self.assertEqual((len(s.asked), slept.call_count), (1, 0))
+
+    def test_records_read_a_few_at_a_time_come_back_in_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Book(DirStore(d))
+            for n in range(1, 21):
+                b.save(Impact(advisory=[f"CVE-2026-{n:03}"], project="MB"))
+            self.assertEqual([i.advisory[0] for i in b.all("MB")], [f"CVE-2026-{n:03}" for n in range(1, 21)])
+
+
+class ReportTests(unittest.TestCase):
+    def records(self):
+        pr1, pr2 = "https://github.com/acme/app/pull/7", "https://github.com/acme/app/pull/8"
+        def rec(adv, sev, pkg, ver, to, prs, status="investigating"):
+            return Impact(advisory=[adv], project="APP", severity=sev, status=status, prs=prs,
+                          where=[{"repo": "acme/app", "file": "uv.lock", "package": pkg, "version": ver,
+                                  "fixed_version": to}])
+        return [rec("CVE-2026-1", "medium", "litellm", "1.82.4", "1.88.6", [pr1]),
+                rec("CVE-2026-2", "critical", "litellm", "1.82.4", "1.88.6", [pr1]),
+                rec("CVE-2026-3", "high", "undici", "7.25.0", "7.30.1", [pr2]),
+                rec("CVE-2026-4", "low", "xlsx", "0.18.5", "", []),
+                rec("CVE-2026-5", "high", "next", "15.5.9", "15.5.28", [pr1], status="fixed")]
+
+    def test_open_records_by_project_and_pr_known_exploited_first(self):
+        recs = self.records()
+        signals = {recs[0].path: (True, 0.91), recs[1].path: (False, 0.02), recs[2].path: (False, None),
+                   recs[3].path: (False, None)}
+        data = report.build(recs, signals, "2026-10-27T15:00:00Z")
+        (p,) = data["projects"]
+        self.assertEqual(p["prs"], [{"pr": "https://github.com/acme/app/pull/7", "advisories": ["CVE-2026-1", "CVE-2026-2"]},
+                                    {"pr": "https://github.com/acme/app/pull/8", "advisories": ["CVE-2026-3"]}])
+        self.assertEqual((p["open"], p["fixed_by_prs"], p["without_pr"]), (4, 3, ["CVE-2026-4"]))
+        self.assertEqual({k: data[k] for k in ("prs", "open", "fixed_by_prs", "kev", "without_pr")},
+                         {"prs": 2, "open": 4, "fixed_by_prs": 3, "kev": 1, "without_pr": 1})
+        self.assertEqual(report.text(data).splitlines()[0], "Fix report, 2026-10-27 15:00 UTC: 2 PRs fix 3 of 4 open "
+                         "advisories (1 known exploited); 1 have no PR yet.")
+
+        page = report.html(data, signals)
+        self.assertIn("<title>Security fixes ready for review: 2 pull requests</title>", page)
+        self.assertIn('<a href="https://github.com/acme/app/pull/7">acme/app#7</a>', page)
+        self.assertIn('<td class="down">1 known</td>', page)
+        self.assertIn("litellm 1.82.4 → 1.88.6", page)
+        self.assertIn('<a href="https://osv.dev/vulnerability/CVE-2026-1">CVE-2026-1</a> medium, known exploited, '
+                      "EPSS 91%", page)
+        self.assertIn("xlsx 0.18.5 · no fixed version yet", page)
+        self.assertNotIn("CVE-2026-5", page)                         # fixed: not open, not in the report
+        self.assertLess(page.index("acme/app#7"), page.index("acme/app#8"))     # the known-exploited one first
+
+    def test_names_are_escaped_and_a_commit_reads_as_one(self):
+        self.assertEqual(report.pr_name("https://github.com/acme/app/commit/7f5769fa12"), "acme/app@7f5769f")
+        rec = Impact(advisory=["CVE-2026-9"], project="APP", prs=["https://github.com/acme/app/pull/1"],
+                     where=[{"package": "<script>", "version": "1", "fixed_version": "2"}])
+        page = report.html(report.build([rec], {}, "2026-10-27T15:00:00Z"), {}, title="A & B")
+        self.assertIn("&lt;script&gt; 1 → 2", page)
+        self.assertIn("<h1>A &amp; B</h1>", page)
+
+    def test_only_an_https_pr_is_a_link(self):
+        rec = Impact(advisory=["CVE-2026-9"], project="APP", prs=["javascript:alert(1)"],
+                     where=[{"package": "zstd", "version": "0.13.3", "fixed_version": "0.14.3"}])
+        page = report.html(report.build([rec], {}, "2026-10-27T15:00:00Z"), {})
+        self.assertNotIn('href="javascript:', page)
+        self.assertIn('<th scope="row">javascript:alert(1)</th>', page)
+        self.assertIn("<p>javascript:alert(1)</p>", page)
 
 
 class OSV:

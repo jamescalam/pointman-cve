@@ -9,13 +9,26 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .impacts import Impact, path_of
 
 NEEDS_NODE = ("this node can't keep an extension's files yet (files.put, list and get): it needs the "
               "Pointman release that brings them")
+
+
+# a call core or the node dropped (core slow, the stream reconnecting): asked again, after these waits (seconds)
+DROPPED = ("didn't answer", "timed out", "timeout", "lost", "connection reset", "unavailable")
+AGAIN_AFTER = (1.0, 3.0)
+READERS = 6                 # records read at once: each read is a round trip to core
+
+
+def dropped(why: str) -> bool:
+    why = why.lower()
+    return any(d in why for d in DROPPED)
 
 
 # a path as the node and core take one: relative, at most 200 characters of a-z 0-9 . _ - /, with no ..
@@ -36,12 +49,15 @@ class Store:
         self.request = request
 
     def _call(self, message):
-        try:
-            return self.request(message)
-        except RuntimeError as e:
-            if "no method" in str(e) or "unknown method" in str(e):
-                raise RuntimeError(NEEDS_NODE) from None
-            raise
+        for wait in (*AGAIN_AFTER, None):
+            try:
+                return self.request(message)
+            except RuntimeError as e:
+                if "no method" in str(e) or "unknown method" in str(e):
+                    raise RuntimeError(NEEDS_NODE) from None
+                if wait is None or not dropped(str(e)):
+                    raise
+                time.sleep(wait)
 
     def put(self, path: str, text: str) -> int:
         return self._call(self.types.FilesPutRequest(path=path, text=text)).version
@@ -116,10 +132,13 @@ class Book:
         return self.store.put(impact.path, impact.to_toml())
 
     def all(self, project: str | None = None) -> list[Impact]:
+        """Every record, or a project's: read a few at a time, in the order they're listed."""
         prefix = f"impacts/{project.lower()}/" if project else "impacts/"
+        paths = [f["path"] for f in self.store.list(prefix)]
+        with ThreadPoolExecutor(max_workers=READERS) as pool:
+            texts = list(pool.map(self.store.get, paths))
         out = []
-        for f in self.store.list(prefix):
-            text = self.store.get(f["path"])
+        for text in texts:
             if text:
                 try:
                     out.append(Impact.from_toml(text))

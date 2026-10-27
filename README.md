@@ -12,6 +12,7 @@ Keep up with security advisories, and keep a shared record of the ones that touc
   - its status in VEX's words (`investigating` is `under_investigation`);
   - for a `not_affected` record, its justification and note; for an `affected` one, the upgrade to take; for a `fixed` one, its evidence.
   `author=` names who the document says made it.
+- **`/cve report [projects]`** builds a page for whoever reviews and merges the fixes, posted as a file: for each project, the PRs that fix its open advisories (known exploited first, then the most severe), what each fixes, and the open advisories with no PR yet. It reads the records' `prs`, so record a PR on its advisories with `/cve set … pr=` when you open it. It changes nothing.
 - **`/cve check <folder> [project]`** does the same for one folder, read as it is on disk. Name a project and it opens an impact there for each one not yet recorded.
 - **`/cve add <advisory> <project>`** records an advisory that touched a project. **`/cve set`** updates the record: its status, where it hit, and the PRs, threads and tasks that dealt with it.
 - **`/cve show <advisory>`** shows an advisory and every project's record of it. **`/cve impacts [project]`** lists the records, the open ones first, fix-first.

@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.12.0"
+version = "0.13.0"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"
@@ -92,6 +92,14 @@ params = { type = "object", required = ["project"], properties = { project = { t
 outputs = ["document"]
 slash = "vex"
 summary = "A project's records as an OpenVEX document, posted as a file: /cve vex MB"
+
+[[commands]]
+kind = "cve.report"
+title = "Fix report: open advisories and the PRs that fix them"
+params = { type = "object", properties = { project = { type = "string", description = "Project keys, comma-separated: SPARK,MB. Left out, every project with open advisories." }, title = { type = "string", description = "The page's title; one that counts the PRs if left out." } } }
+outputs = ["document"]
+slash = "report"
+summary = "Every open advisory a PR fixes, by project and PR, as a page to review and merge from: /cve report SPARK,MB"
 
 [[commands]]
 kind = "cve.show"

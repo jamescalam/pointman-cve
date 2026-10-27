@@ -158,6 +158,33 @@ class ExtensionTests(unittest.TestCase):
         self.assertIn("which project?", self.refused("cve.vex", {}))
         self.assertIn("nothing is recorded for PFE", self.refused("cve.vex", {"project": "PFE"}))
 
+    def test_report_posts_a_page_of_each_pr_and_what_it_fixes(self):
+        self.assertIn("nothing is open, so there's nothing to report", self.refused("cve.report", {}))
+        self.run_command("cve.add", {"advisory": "CVE-2026-77,CVE-2026-78", "project": "MB", "status": "affected",
+                                     "package": "zstd-safe", "version": "7.3.0", "fixed_version": "8.2.0",
+                                     "repo": "pointman-ai/pointman"})
+        self.run_command("cve.add", {"advisory": "CVE-2026-79", "project": "SPARK", "package": "xlsx", "version": "0.18.5"})
+        self.run_command("cve.set", {"advisory": "CVE-2026-77,CVE-2026-78", "project": "MB",
+                                     "pr": "https://github.com/pointman-ai/pointman/pull/20", "note": "fix PR open"})
+        versions = {path: len(v) for path, v in self.files.versions.items()}
+        done = self.node.run("cve.report", {})
+        got = done.result
+        self.assertEqual({k: got[k] for k in ("prs", "open", "fixed_by_prs", "kev", "without_pr")},
+                         {"prs": 1, "open": 3, "fixed_by_prs": 2, "kev": 0, "without_pr": 1}, got)
+        self.assertEqual([p["project"] for p in got["projects"]], ["MB", "SPARK"])
+        self.assertEqual(got["projects"][0]["prs"], [{"pr": "https://github.com/pointman-ai/pointman/pull/20",
+                                                      "advisories": ["CVE-2026-77", "CVE-2026-78"]}])
+        self.assertIn("1 PRs fix 2 of 3 open advisories", got["text"])
+        self.assertIn("Known-exploited and EPSS couldn't be had", got["text"])          # offline
+        (out,) = done.outputs
+        self.assertEqual((out.kind, Path(out.path).name), ("document", got["file"]))
+        page = Path(out.path).read_text()
+        self.assertIn('<a href="https://github.com/pointman-ai/pointman/pull/20">pointman-ai/pointman#20</a>', page)
+        self.assertIn("zstd-safe 7.3.0 → 8.2.0", page)
+        only = self.run_command("cve.report", {"project": "spark"})
+        self.assertEqual((only["prs"], only["without_pr"], [p["project"] for p in only["projects"]]), (0, 1, ["SPARK"]))
+        self.assertEqual({path: len(v) for path, v in self.files.versions.items()}, versions)  # it wrote nothing
+
     def test_one_fix_records_several_advisories_at_once(self):
         got = self.run_command("cve.add", {"advisory": "RUSTSEC-2026-0367, RUSTSEC-2026-0368", "project": "MB",
                                            "package": "zip", "version": "8.6.0", "status": "affected"})
