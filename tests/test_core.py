@@ -478,6 +478,74 @@ class ReportTests(unittest.TestCase):
         self.assertIn("<p>javascript:alert(1)</p>", page)
 
 
+    def test_a_pr_waits_while_github_says_it_s_open_or_its_fix_isn_t_at_the_ref(self):
+        pr1, pr2 = "https://github.com/acme/app/pull/7", "https://github.com/acme/app/pull/8"
+        merged, gone = "https://github.com/acme/app/pull/9", "https://github.com/acme/app/pull/10"
+        recs = self.records() + [
+            Impact(advisory=["CVE-2026-6"], project="APP", severity="high", prs=[merged]),
+            Impact(advisory=["CVE-2026-7"], project="APP", severity="high", prs=[gone]),
+            Impact(advisory=["CVE-2026-8"], project="APP", severity="high",
+                   prs=["https://github.com/acme/app/commit/7f5769fa12"])]
+        hits = {"APP": {"CVE-2026-1": True, "CVE-2026-2": False, "CVE-2026-3": None, "CVE-2026-4": None,
+                        "CVE-2026-6": None, "CVE-2026-8": None}}               # CVE-2026-7's version has gone
+        got = report.waiting(recs, hits, {pr1: "OPEN", merged: "MERGED"})   # pr2 and gone: state not known
+        self.assertEqual([(x["pr"], x["advisories"], x["worst"], x["kev"], x["state"]) for x in got],
+                         [(pr1, ["CVE-2026-1", "CVE-2026-2"], "critical", 1, "OPEN"),
+                          (pr2, ["CVE-2026-3"], "high", 0, "")])
+        self.assertEqual(got[0]["upgrades"], ["litellm 1.82.4 → 1.88.6"])
+        self.assertEqual(report.waiting(recs, hits, {pr1: "CLOSED", pr2: "MERGED", merged: "MERGED"}), [])
+        self.assertEqual([x["pr"] for x in report.waiting(recs, {}, {gone: "OPEN"})], [gone])
+
+    def test_a_scan_s_digest_is_a_few_plain_lines(self):
+        recs = self.records()
+        prs = report.waiting(recs, {"APP": {"CVE-2026-1": True, "CVE-2026-3": None}}, {})
+        def row(adv, sev, ver, kev=None):
+            return {"advisory": adv, "severity": sev, "package": "litellm", "version": ver, "kev": kev}
+        found = [{"project": "APP", "ref": "origin/main", "open": 4, "new": [row("CVE-2026-1", "medium", "1.82.4", True),
+                                                                          row("CVE-2026-1", "medium", "1.83.0", True),
+                                                                          row("CVE-2026-3", "high", "7.25.0")],
+                  "reopened": [], "gone": [row("CVE-2026-2", "critical", "1.82.4")],
+                  "plan": [{"unfixed": ["CVE-2026-4"]}]},
+                 *[{"project": "EXT", "ref": "origin/main", "open": 1, "new": [], "reopened": [], "gone": [],
+                    "plan": [{"unfixed": ["GHSA-qwgh-2vcv-g2f7"]}]} for _ in range(2)],
+                 {"project": "PFE", "repo": "~/Documents/pfe", "ref": "origin/nope", "error": "origin/nope isn't a ref"}]
+        got = report.digest(found, prs, {"APP": "App", "EXT": "Extensions"})
+        self.assertEqual(got["headline"], "2 new advisories (1 known exploited, 1 high or critical). 2 fix PRs wait "
+                                          "to be merged. 1 repo couldn't be scanned.")
+        self.assertEqual(got["projects_text"].splitlines(), [
+            "- App: 2 new (1 known exploited, 1 high or critical) · 4 open · 2 PRs to merge · 1 gone from main, "
+            "to mark fixed · 1 with no fix yet",
+            "- Extensions (2 repos): nothing new · 1 open · 1 with no fix yet",
+            "- PFE: couldn't be scanned: origin/nope isn't a ref"])
+        self.assertEqual(got["waiting_text"].splitlines(), [
+            "- https://github.com/acme/app/pull/7 fixes 2, 1 known exploited, worst critical · litellm 1.82.4 → 1.88.6",
+            "- https://github.com/acme/app/pull/8 fixes 1, worst high · undici 7.25.0 → 7.30.1"])
+        self.assertEqual((got["waiting"], [x["pr"] for x in got["waiting_prs"]]),
+                         (2, ["https://github.com/acme/app/pull/7", "https://github.com/acme/app/pull/8"]))
+        for text in (got["headline"], got["projects_text"], got["waiting_text"]):        # posted as they are
+            self.assertFalse(set(text) & set("*_`[]<>|~@"), text)
+        quiet = report.digest(found[1:3], [], {})
+        self.assertEqual(quiet["headline"], "No new advisories. No fix PR waits to be merged.")
+        self.assertEqual((quiet["waiting"], quiet["waiting_text"]), (0, ""))
+
+    def test_pr_states_are_read_only_where_they_can_be(self):
+        with mock.patch.dict("os.environ", {"CVE_OFFLINE": "1"}):
+            self.assertEqual(repos.pr_states(["https://github.com/acme/app/pull/7"]), {})
+        with mock.patch.object(repos.shutil, "which", return_value=None), mock.patch.object(repos, "GH_AT", ()):
+            self.assertEqual(repos.pr_states(["https://github.com/acme/app/pull/7"]), {})
+        answers = {"7": (0, b'{"state":"OPEN"}'), "8": (0, b'{"state":"MERGED"}'), "9": (1, b""), "10": (0, b"[]")}
+        def run(args, **kw):
+            code, out = answers[args[3].rsplit("/", 1)[1]]
+            return mock.Mock(returncode=code, stdout=out)
+        links = [f"https://github.com/acme/app/pull/{n}" for n in (7, 8, 9, 10)] + ["https://github.com/acme/app/commit/1"]
+        with mock.patch.dict("os.environ", {"CVE_OFFLINE": ""}), mock.patch.object(repos.shutil, "which", return_value="gh"), \
+                mock.patch.object(repos.subprocess, "run", side_effect=run) as ran:
+            got = repos.pr_states(links)
+        self.assertEqual(got, {links[0]: "OPEN", links[1]: "MERGED"})
+        self.assertEqual(ran.call_count, 4)                                   # the commit isn't asked about
+        self.assertEqual(ran.call_args.args[0][:3], ["gh", "pr", "view"])
+
+
 class OSV:
     """A stand-in OSV: rustls-webpki 0.103.15 has OSV_VULN (GHSA-xxxx-yyyy-zzzz, CVE-2026-9999); nothing else has
     any. `asked` keeps every (ecosystem, name, version) it was asked about. It stands in for CISA's KEV list and
@@ -916,7 +984,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(sorted(m["settings"]["properties"]), ["ecosystem", "projects"])
         item = m["settings"]["properties"]["projects"]["items"]
         self.assertEqual((sorted(item["properties"]), item["required"]),
-                         (["include", "key", "ref", "repo", "skip"], ["key", "repo"]))
+                         (["include", "key", "name", "ref", "repo", "skip"], ["key", "repo"]))
         scan = next(c for c in m["commands"] if c["kind"] == "cve.scan")
         self.assertEqual((scan["slash"], list(scan["params"]["properties"])), ("scan", ["project"]))
         self.assertEqual([e["name"] for e in m["events"]], ["cve.scanned"])

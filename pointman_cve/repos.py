@@ -5,9 +5,12 @@ files, and the scan says so."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +21,9 @@ REF = "origin/main"
 FETCH_FOR = 120          # seconds a fetch may take
 GIT_FOR = 30             # and any other git command
 REF_OK = re.compile(r"[A-Za-z0-9._/@{}^~-]{1,200}")
+PR = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+GH_FOR = 20              # seconds `gh pr view` may take
+GH_AT = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")      # where gh is when a node's PATH is launchd's short one
 
 
 class GitFailed(Exception):
@@ -31,6 +37,7 @@ class Project:
     ref: str = REF
     skip: tuple[str, ...] = ()       # more paths that aren't the project's (globs, or folders), beside test data
     include: tuple[str, ...] = ()    # paths to read anyway
+    name: str = ""                   # what people call it (Spark), for a scan's digest; its key if left out
 
 
 @dataclass
@@ -67,8 +74,31 @@ def from_settings(value) -> list[Project]:
             if not isinstance(given, list) or not all(isinstance(x, str) for x in given):
                 raise ValueError(f"projects #{n} ({key}): {k} is a list of paths in the repo (tests/data, *.lock)")
             paths[k] = tuple(x.strip() for x in given if x.strip())
-        out.append(Project(key.upper(), repo, ref, **paths))
+        name = str(p.get("name") or "").strip()[:60]
+        out.append(Project(key.upper(), repo, ref, **paths, name=name))
     return out
+
+
+def pr_states(links: list[str]) -> dict[str, str]:
+    """Each GitHub PR's state (OPEN, MERGED or CLOSED), as this machine's own `gh` sign-in reads it, a few at a time.
+    One it can't say (no gh, not signed in, offline, not a PR link) is left out: a scan then goes by whether its
+    advisories are still at the ref. It reads; it changes nothing. CVE_OFFLINE=1 asks nothing."""
+    links = [x for x in dict.fromkeys(links) if PR.fullmatch(x)]
+    gh = shutil.which("gh") or next((x for x in GH_AT if os.access(x, os.X_OK)), None)
+    if not links or not gh or os.environ.get("CVE_OFFLINE") == "1":
+        return {}
+
+    def one(link: str) -> str | None:
+        try:
+            r = subprocess.run([gh, "pr", "view", link, "--json", "state"], capture_output=True, timeout=GH_FOR,
+                               stdin=subprocess.DEVNULL, env={**os.environ, "GH_PROMPT_DISABLED": "1"})
+            state = json.loads(r.stdout).get("state") if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+            return None
+        return state if state in ("OPEN", "MERGED", "CLOSED") else None
+
+    with ThreadPoolExecutor(6) as pool:
+        return {link: s for link, s in zip(links, pool.map(one, links), strict=True) if s}
 
 
 def git(folder: Path, *args: str, timeout: float = GIT_FOR) -> str:

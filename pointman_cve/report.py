@@ -9,9 +9,11 @@ import re
 from html import escape
 
 from .impacts import Impact
+from .repos import PR
 from .scans import OPEN, RANK, percent
 
 PACKAGES_SHOWN = 2          # a PR's packages named in its table row; the rest are "+N more"
+PRS_SHOWN = 15              # PRs a scan's digest lists; the rest are counted
 
 
 def osv(advisory: str) -> str:
@@ -92,6 +94,88 @@ def text(data: dict) -> str:
     for p in data["projects"]:
         lines.append(f"- {p['project']}: {len(p['prs'])} PRs fix {p['fixed_by_prs']} of {p['open']} open")
     return "\n".join(lines)
+
+
+def waiting(records: list[Impact], hits: dict[str, dict], states: dict[str, str]) -> list[dict]:
+    """The PRs that wait to be merged: those an open record names that GitHub says are open, or, where their state
+    couldn't be had, whose advisories the scan still finds at the ref (a merged PR's have gone). `hits`: each
+    project's advisory ids hit at its refs, each known exploited or not; `states`: each PR's state from GitHub.
+    Known exploited first, then the most severe, then those that fix the most."""
+    by_pr: dict[str, list[Impact]] = {}
+    for r in records:
+        for link in r.prs if r.status in OPEN else []:
+            if PR.fullmatch(link):
+                by_pr.setdefault(link, []).append(r)
+
+    def there(r: Impact) -> bool:
+        return bool(hits.get(r.project, {}).keys() & {i.upper() for i in r.advisory})
+
+    out = []
+    for link, rs in by_pr.items():
+        state = states.get(link)
+        if not (state == "OPEN" or (state is None and any(there(r) for r in rs))):
+            continue
+        kev = sum(1 for r in rs if any(hits.get(r.project, {}).get(i.upper()) for i in r.advisory))
+        out.append({"pr": link, "project": rs[0].project, "advisories": [r.advisory[0] for r in rs], "worst": worst(rs),
+                    "kev": kev, "upgrades": list(dict.fromkeys(u for r in rs for u in upgrades(r))),
+                    "state": states.get(link, "")})
+    out.sort(key=lambda x: (-x["kev"], RANK.get(x["worst"], 9), -len(x["advisories"]), x["pr"]))
+    return out
+
+
+def digest(found: list[dict], prs: list[dict], names: dict[str, str]) -> dict:
+    """A scan as a person takes it in, in plain lines (a workflow's post escapes Markdown in what it's given): a
+    headline, the PRs that wait to be merged, and a line a project, its repos together. `found` is each repo's
+    scan, `prs` what `waiting` gives, `names` what people call a project's key."""
+    rows, n_new, n_hi, n_kev, n_back, n_failed = [], 0, 0, 0, 0, 0
+    for key in dict.fromkeys(f["project"] for f in found):
+        mine = [f for f in found if f["project"] == key]
+        read = [f for f in mine if "error" not in f]
+        new = {h["advisory"]: h for f in read for h in f["new"]}
+        back = {h["advisory"] for f in read for h in f["reopened"]}
+        hi = sum(1 for h in new.values() if h["severity"] in ("critical", "high"))
+        kev = sum(1 for h in new.values() if h.get("kev"))
+        n_new, n_hi, n_kev, n_back = n_new + len(new), n_hi + hi, n_kev + kev, n_back + len(back)
+        n_failed += len(mine) - len(read)
+        said = [x for x in (f"{kev} known exploited" if kev else "", f"{hi} high or critical" if hi else "") if x]
+        parts = [f"{len(new)} new" + (f" ({', '.join(said)})" if said else "") if new else "nothing new"]
+        if back:
+            parts.append(f"{len(back)} reopened")
+        if read:
+            parts.append(f"{max(f['open'] for f in read)} open")
+        w = sum(1 for x in prs if x["project"] == key)
+        if w:
+            parts.append(f"{w} PR{'s' if w != 1 else ''} to merge")
+        gone = {h["advisory"] for f in read for h in f["gone"]}
+        if gone:
+            at = (read[0]["ref"] or "its files").removeprefix("origin/")
+            parts.append(f"{len(gone)} gone from {at}, to mark fixed")
+        stuck = {i for f in read for x in f.get("plan") or [] for i in x["unfixed"]}
+        if stuck:
+            parts.append(f"{len(stuck)} with no fix yet")
+        if not read:
+            parts = [f"couldn't be scanned: {mine[0]['error']}"]
+        elif len(read) < len(mine):
+            parts.append(f"{len(mine) - len(read)} of its repos couldn't be scanned")
+        repos = f" ({len(mine)} repos)" if len(mine) > 1 else ""
+        rows.append(f"- {names.get(key) or key}{repos}: " + " · ".join(parts))
+    said = [x for x in (f"{n_kev} known exploited" if n_kev else "", f"{n_hi} high or critical" if n_hi else "") if x]
+    head = (f"{n_new} new advisor{'ies' if n_new != 1 else 'y'}" + (f" ({', '.join(said)})" if said else "")
+            if n_new else "No new advisories") + (f", {n_back} reopened" if n_back else "") + "."
+    head += (f" {len(prs)} fix PR{'s wait' if len(prs) != 1 else ' waits'} to be merged." if prs
+             else " No fix PR waits to be merged.")
+    if n_failed:
+        head += f" {n_failed} repo{'s' if n_failed != 1 else ''} couldn't be scanned."
+    lines = []
+    for x in prs[:PRS_SHOWN]:
+        ups = ", ".join(x["upgrades"][:PACKAGES_SHOWN]) + (f" +{len(x['upgrades']) - PACKAGES_SHOWN} more"
+                                                          if len(x["upgrades"]) > PACKAGES_SHOWN else "")
+        lines.append(f"- {x['pr']} fixes {len(x['advisories'])}" + (f", {x['kev']} known exploited" if x["kev"] else "")
+                     + (f", worst {x['worst']}" if x["worst"] != "unknown" else "") + (f" · {ups}" if ups else ""))
+    if len(prs) > PRS_SHOWN:
+        lines.append(f"- …and {len(prs) - PRS_SHOWN} more: /cve report lists every one.")
+    return {"headline": head, "waiting": len(prs), "waiting_text": "\n".join(lines), "projects_text": "\n".join(rows),
+            "waiting_prs": [{k: x[k] for k in ("pr", "project", "advisories", "worst", "kev", "state")} for x in prs]}
 
 
 def html(data: dict, signals: dict[str, tuple], title: str = "") -> str:
