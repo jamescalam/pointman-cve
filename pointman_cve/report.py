@@ -96,11 +96,13 @@ def text(data: dict) -> str:
     return "\n".join(lines)
 
 
-def waiting(records: list[Impact], hits: dict[str, dict], states: dict[str, str]) -> list[dict]:
+def waiting(records: list[Impact], hits: dict[str, dict], states: dict[str, str],
+            plans: dict[str, list[dict]] | None = None) -> list[dict]:
     """The PRs that wait to be merged: those an open record names that GitHub says are open, or, where their state
     couldn't be had, whose advisories the scan still finds at the ref (a merged PR's have gone). `hits`: each
-    project's advisory ids hit at its refs, each known exploited or not; `states`: each PR's state from GitHub.
-    Known exploited first, then the most severe, then those that fix the most."""
+    project's advisory ids hit at its refs, each known exploited or not; `states`: each PR's state from GitHub;
+    `plans`: each project's upgrade plan at its refs, which names a PR's upgrades (`name from → to`). Known
+    exploited first, then the most severe, then those that fix the most."""
     by_pr: dict[str, list[Impact]] = {}
     for r in records:
         for link in r.prs if r.status in OPEN else []:
@@ -116,9 +118,12 @@ def waiting(records: list[Impact], hits: dict[str, dict], states: dict[str, str]
         if not (state == "OPEN" or (state is None and any(there(r) for r in rs))):
             continue
         kev = sum(1 for r in rs if any(hits.get(r.project, {}).get(i.upper()) for i in r.advisory))
+        ids = {i.upper() for r in rs for i in r.advisory}
+        ups = [f"{x['package']} {x['from']}" + (f" → {x['to']}" if x.get("to") else "")
+               for key in dict.fromkeys(r.project for r in rs) for x in (plans or {}).get(key, [])
+               if ids & {i.upper() for i in x["advisories"]}]
         out.append({"pr": link, "project": rs[0].project, "advisories": [r.advisory[0] for r in rs], "worst": worst(rs),
-                    "kev": kev, "upgrades": list(dict.fromkeys(u for r in rs for u in upgrades(r))),
-                    "state": states.get(link, "")})
+                    "kev": kev, "upgrades": list(dict.fromkeys(ups)), "state": states.get(link, "")})
     out.sort(key=lambda x: (-x["kev"], RANK.get(x["worst"], 9), -len(x["advisories"]), x["pr"]))
     return out
 
