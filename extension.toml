@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.13.0"
+version = "0.14.0"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"
@@ -29,9 +29,9 @@ type = "object"
 [settings.properties.projects]
 type = "array"
 title = "Projects"
-description = "What /cve scan reads: each a project's key (MB), its git repo under ~/Documents, and the ref whose lockfiles count (origin/main if left out). Test data is skipped. A folder that isn't a git repo is read as files."
+description = "What /cve scan reads: each a project's key (MB), its name, its git repo under ~/Documents, and the ref whose lockfiles count (origin/main if left out). Test data is skipped. A folder that isn't a git repo is read as files."
 default = []
-items = { type = "object", required = ["key", "repo"], additionalProperties = false, properties = { key = { type = "string", title = "Project", description = "A project's key: MB.", pattern = "^[A-Za-z][A-Za-z0-9]{0,15}$" }, repo = { type = "string", title = "Repo", description = "Its folder: ~/Documents/message-board." }, ref = { type = "string", title = "Ref", description = "A branch, tag or commit, fetched first.", default = "origin/main" }, skip = { type = "array", items = { type = "string" }, title = "Skip", description = "More paths that aren't the project's, beside tests, test, fixtures, testdata, examples and vendor folders: legacy/, docs/*.lock." }, include = { type = "array", items = { type = "string" }, title = "Include", description = "Paths to read anyway, even in those folders: examples/app." } } }
+items = { type = "object", required = ["key", "repo"], additionalProperties = false, properties = { key = { type = "string", title = "Project", description = "A project's key: MB.", pattern = "^[A-Za-z][A-Za-z0-9]{0,15}$" }, name = { type = "string", title = "Name", description = "What people call it, in a scan's digest: Spark. Its key if left out.", maxLength = 60 }, repo = { type = "string", title = "Repo", description = "Its folder: ~/Documents/message-board." }, ref = { type = "string", title = "Ref", description = "A branch, tag or commit, fetched first.", default = "origin/main" }, skip = { type = "array", items = { type = "string" }, title = "Skip", description = "More paths that aren't the project's, beside tests, test, fixtures, testdata, examples and vendor folders: legacy/, docs/*.lock." }, include = { type = "array", items = { type = "string" }, title = "Include", description = "Paths to read anyway, even in those folders: examples/app." } } }
 
 [settings.properties.ecosystem]
 type = "string"

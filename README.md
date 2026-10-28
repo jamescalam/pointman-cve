@@ -95,6 +95,7 @@ An open record whose version has gone is listed as gone, and stays open until it
 ```
 
 - **`key`** is the Pointman project the records go under.
+- **`name`** (optional) is what people call it (`Spark`), in a scan's digest. Repos that share a key share a line there.
 - **`repo`** is its git folder under `~/Documents`. A scan fetches it first, lists its lockfiles at the ref and reads each one with `git show <ref>:<path>`. The working tree is never read, so an old or dirty checkout can't change the answer. A folder that isn't a git repo is read as files, and the answer says so.
 - **`ref`** is a branch, tag or commit: `origin/main` if left out.
 - **`skip`** (optional) names more paths that aren't the project's: a folder (`legacy`) or a glob (`docs/*/yarn.lock`).
@@ -103,6 +104,14 @@ An open record whose version has gone is listed as gone, and stays open until it
 A project that can't be read (its folder is missing, its ref unknown, or git fails) gets an `error` in the answer, and the others are still scanned. The answer and the event count these in `failed`. A scan is refused only when no project could be read.
 
 Nothing runs on its own. A scan runs when someone asks for one, or when a workflow calls `cve.scan`. When it's done it sends the event `cve.scanned`, with the counts in all and for each project. A scan with nothing new still answers, so a workflow can branch on `new`.
+
+**A digest for a person.** Beside its full `text`, a scan answers a few plain lines a workflow can post as they are (a workflow's post escapes Markdown in the values it's given, so they carry none):
+
+- `headline`: what's new and reopened (how many known exploited, high or critical), and how many fix PRs wait to be merged.
+- `waiting` and `waiting_text`: the fix PRs that wait to be merged, a line each with its link, what it fixes and its upgrades; known exploited first, then the most severe. A PR waits when an open record names it and GitHub says it's open. Where its state can't be had (no `gh` signed in on the machine, or offline), it waits while the scan still finds its advisories at the ref. `waiting_prs` has the same as data.
+- `projects_text`: a line a project, its repos together under its `name`: new, reopened, open, PRs to merge, gone (to mark fixed) and with no fix yet.
+
+The PRs' states are read with the machine's own `gh` sign-in (`gh pr view <link> --json state`). It only reads.
 
 ## Fix first
 

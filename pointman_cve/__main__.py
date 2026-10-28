@@ -2,7 +2,8 @@
 
 - `/cve recent [ecosystem] [days]`: advisories published lately, newest first, in a pane.
 - `/cve scan [project]`: every project in the `projects` setting (or the one named), its lockfiles read from git
-  at its ref: an impact is opened for each new hit, and the answer says what's new, reopened, gone and open.
+  at its ref: an impact is opened for each new hit, and the answer says what's new, reopened, gone and open, with a
+  digest for a person (a headline, the fix PRs that wait to be merged, a line a project) in plain text.
 - `/cve check <folder> [project]`: which advisories hit the versions a folder's lockfiles pin, as they are on disk;
   with a project, an impact is opened for each one not yet recorded.
 - `/cve add <advisory> <project>`, `/cve set <advisory> <project> …`: our record of one that touched a project,
@@ -246,6 +247,12 @@ def scan(job):
         raise Refused("no project could be scanned: " + "; ".join(f"{f['project']}: {f['error']}" for f in found))
     all_ = scans.totals(found)
     text = scans.text(found, all_)
+    hits: dict[str, dict] = {}
+    for f in found:
+        hits.setdefault(f["project"], {}).update(f.pop("hits", {}))
+    records = [r for k in hits for r in b.all(k)]
+    prs = report.waiting(records, hits, repos.pr_states([x for r in records if r.status in scans.OPEN for x in r.prs]))
+    said = report.digest(found, prs, {p.key: p.name for p in projects if p.name})
     for f in found:
         f.pop("files", None)
         f.pop("opened", None)
@@ -253,7 +260,7 @@ def scan(job):
         {"project": f["project"], "ref": f["ref"], "error": f["error"]} if "error" in f else
         {"project": f["project"], "ref": f["ref"], "commit": f["commit"],
          **{k: len(f[k]) for k in ("new", "reopened", "gone", "still", "confirmed")}, "open": f["open"]} for f in found]})
-    return {"projects": found, **all_, "text": text}
+    return {"projects": found, **all_, **said, "text": text}
 
 
 def caller(job) -> tuple[str, bool]:

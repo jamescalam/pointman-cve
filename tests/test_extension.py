@@ -331,7 +331,8 @@ class ExtensionTests(unittest.TestCase):
         self.url = self.osv()
         (self.dir / "app" / "web").mkdir()
         shutil.copy(ROOT / "tests" / "fixtures" / "package-lock.json", self.dir / "app" / "web")
-        self.scanning({"key": "mb", "repo": str(repo.checkout), "ref": "v1"}, {"key": "WEB", "repo": str(self.dir / "app" / "web")})
+        self.scanning({"key": "mb", "name": "Pointman", "repo": str(repo.checkout), "ref": "v1"},
+                      {"key": "WEB", "repo": str(self.dir / "app" / "web")})
         got = self.run_command("cve.scan", {})
         hit = {"advisory": "CVE-2026-9999", "package": "rustls-webpki", "version": "0.103.15", "ecosystem": "rust",
                "severity": "medium", "fixed": "0.103.16", "kev": True, "epss": 0.42, "cvss": 4.8}
@@ -347,6 +348,9 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual((web["ref"], web["commit"], web["new"], web["open"]), ("", "", [], 0))
         self.assertEqual(web["note"], "read as files, not from git: it isn't a git repo")
         self.assertTrue(got["text"].startswith("Scanned MB, WEB: 1 new, 0 reopened, 0 gone, 1 open."), got["text"])
+        self.assertEqual((got["headline"], got["projects_text"], got["waiting"], got["waiting_text"]),
+                         ("1 new advisory (1 known exploited). No fix PR waits to be merged.",
+                          "- Pointman: 1 new (1 known exploited) · 1 open\n- WEB: nothing new · 0 open", 0, ""))
         self.assertIn("Read as files, not from git: it isn't a git repo.", got["text"])
         self.assertIn("- new: **CVE-2026-9999** (medium 4.8, known exploited, EPSS 42%) rust rustls-webpki", got["text"])
         self.assertTrue(got["text"].endswith("EPSS scores: FIRST, https://www.first.org/epss"), got["text"])
@@ -390,13 +394,22 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(event["projects"][0], {"project": "MB", "ref": "v1", "commit": repo.v1, "new": 1,
                                                 "reopened": 0, "gone": 0, "still": 0, "confirmed": 0, "open": 1})
 
+        pr = "https://github.com/acme/app/pull/7"
+        self.run_command("cve.set", {"advisory": "CVE-2026-9999", "project": "MB", "pr": pr, "by": "@test"})
+        again = self.run_command("cve.scan", {"project": "mb"})       # still at v1, so its PR waits (offline: no state)
+        self.assertEqual((again["new"], again["waiting"], again["waiting_prs"][0]["pr"]), (0, 1, pr))
+        self.assertEqual(again["waiting_text"], f"- {pr} fixes 1, 1 known exploited, worst medium · "
+                                                "rustls-webpki 0.103.15 → 0.103.16")
+        self.assertEqual(again["headline"], "No new advisories. 1 fix PR waits to be merged.")
+
         self.scanning({"key": "MB", "repo": str(repo.checkout)}, {"key": "WEB", "repo": str(self.dir / "app" / "web")})
         got = self.run_command("cve.scan", {"project": "mb"})                  # origin/main, after a fetch
+        self.assertEqual(got["waiting"], 0)                                     # its version has gone: merged
         self.assertEqual([p["project"] for p in got["projects"]], ["MB"])
         self.assertEqual((got["new"], got["gone"], got["open"]), (0, 1, 1))     # nothing new still answers
         gone = {**hit, "kev": None, "epss": None, "cvss": None}                 # gone isn't looked up again
         self.assertEqual((got["projects"][0]["commit"], got["projects"][0]["gone"]), (repo.v2, [gone]))
-        self.assertEqual(len(self.files.versions["impacts/mb/cve-2026-9999.toml"]), 1)      # left as it was
+        self.assertEqual(len(self.files.versions["impacts/mb/cve-2026-9999.toml"]), 2)      # its PR; then left as it was
         self.assertEqual(self.node.events["cve.scanned"]["gone"], 1)
         self.assertNotIn("0.103.99", {v for _, _, v in self.asked})             # never the working tree
 

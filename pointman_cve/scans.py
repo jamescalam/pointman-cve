@@ -126,12 +126,13 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
       with the scan, ref, commit and time (a record is confirmed once every repo it was found in is);
     - `reopened`: records confirmed for this repo whose version is back: affected again, with a note;
     A record found here too, under an advisory recorded from another repo, gains this repo's places.
-    - `gone`: open records from this repo that nothing hits any more, left open for an agent to mark fixed."""
+    - `gone`: open records from this repo that nothing hits any more, left open for an agent to mark fixed;
+    - `hits`: every advisory id the ref is hit by, with whether it's known exploited (None: not known)."""
     records = book.all(key)
     by_id = {i.upper(): r for r in records for i in r.advisory}
-    new, reopened, still, made, hit_ids = [], [], [], [], set()
+    new, reopened, still, made, hit_ids = [], [], [], [], {}
     for ids, a, keys in found:
-        hit_ids |= {i.upper() for i in ids}
+        hit_ids |= {i.upper(): a.kev if a else None for i in ids}
         rows = [hit(ids[0], e, n, v, severity_of(a), fixed_for(a, n, v), a) for e, n, v in keys]
         record = next((by_id[i.upper()] for i in ids if i.upper() in by_id), None)
         if record is None:
@@ -165,7 +166,7 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
     gone, confirmed = [], []
     for r in records:
         mine = [w for w in r.where if w.get("repo") == got.name and w.get("package")]
-        if not mine or hit_ids & {i.upper() for i in r.advisory}:
+        if not mine or hit_ids.keys() & {i.upper() for i in r.advisory}:
             continue
         if r.status in OPEN:
             gone += [hit(r.advisory[0], str(w.get("ecosystem") or ""), str(w["package"]), str(w.get("version") or ""),
@@ -179,7 +180,7 @@ def scan(key: str, repo: str, got: Read, found: Found, book: Book, by: str) -> d
     return {"project": key, "repo": repo, "ref": got.ref, "commit": got.commit, "new": new, "reopened": reopened,
             "still": still, "confirmed": confirmed, "gone": gone, "open": sum(1 for r in records if r.status in OPEN),
             "note": got.note, "plan": plan(found, records, got.where), "skipped": len(got.skipped),
-            "files": len(got.files), "opened": made}
+            "files": len(got.files), "opened": made, "hits": hit_ids}
 
 
 def plan(found: Found, records: list[Impact], where: dict[tuple, list[str]]) -> list[dict]:
