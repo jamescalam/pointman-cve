@@ -5,7 +5,7 @@
 [extension]
 id = "cve"
 name = "CVE tracker"
-version = "0.14.0"
+version = "0.14.1"
 publisher = "jamescalam"
 summary = "Recent advisories, the ones that hit your lockfiles, and a shared record of each that touched a project."
 node = ">=0.2.0"

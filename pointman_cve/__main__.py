@@ -248,10 +248,13 @@ def scan(job):
     all_ = scans.totals(found)
     text = scans.text(found, all_)
     hits: dict[str, dict] = {}
+    plans: dict[str, list[dict]] = {}
     for f in found:
         hits.setdefault(f["project"], {}).update(f.pop("hits", {}))
+        plans.setdefault(f["project"], []).extend(f.get("plan") or [])
     records = [r for k in hits for r in b.all(k)]
-    prs = report.waiting(records, hits, repos.pr_states([x for r in records if r.status in scans.OPEN for x in r.prs]))
+    states = repos.pr_states([x for r in records if r.status in scans.OPEN for x in r.prs])
+    prs = report.waiting(records, hits, states, plans)
     said = report.digest(found, prs, {p.key: p.name for p in projects if p.name})
     for f in found:
         f.pop("files", None)

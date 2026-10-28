@@ -478,6 +478,13 @@ class ReportTests(unittest.TestCase):
         self.assertIn("<p>javascript:alert(1)</p>", page)
 
 
+    def plans(self):
+        """The scan's plan at the ref: what names each PR's upgrades (a record's own `where` can be stale)."""
+        return {"APP": [{"package": "litellm", "from": "1.82.4", "to": "1.88.6", "advisories": ["CVE-2026-1", "CVE-2026-2"]},
+                        {"package": "litellm", "from": "1.82.4", "to": "1.88.6", "advisories": ["CVE-2026-1"]},
+                        {"package": "undici", "from": "7.25.0", "to": "7.30.1", "advisories": ["CVE-2026-3"]},
+                        {"package": "xlsx", "from": "0.18.5", "to": "", "advisories": ["CVE-2026-4"]}]}
+
     def test_a_pr_waits_while_github_says_it_s_open_or_its_fix_isn_t_at_the_ref(self):
         pr1, pr2 = "https://github.com/acme/app/pull/7", "https://github.com/acme/app/pull/8"
         merged, gone = "https://github.com/acme/app/pull/9", "https://github.com/acme/app/pull/10"
@@ -488,17 +495,18 @@ class ReportTests(unittest.TestCase):
                    prs=["https://github.com/acme/app/commit/7f5769fa12"])]
         hits = {"APP": {"CVE-2026-1": True, "CVE-2026-2": False, "CVE-2026-3": None, "CVE-2026-4": None,
                         "CVE-2026-6": None, "CVE-2026-8": None}}               # CVE-2026-7's version has gone
-        got = report.waiting(recs, hits, {pr1: "OPEN", merged: "MERGED"})   # pr2 and gone: state not known
+        got = report.waiting(recs, hits, {pr1: "OPEN", merged: "MERGED"}, self.plans())   # pr2, gone: not known
         self.assertEqual([(x["pr"], x["advisories"], x["worst"], x["kev"], x["state"]) for x in got],
                          [(pr1, ["CVE-2026-1", "CVE-2026-2"], "critical", 1, "OPEN"),
                           (pr2, ["CVE-2026-3"], "high", 0, "")])
-        self.assertEqual(got[0]["upgrades"], ["litellm 1.82.4 → 1.88.6"])
+        self.assertEqual([x["upgrades"] for x in got], [["litellm 1.82.4 → 1.88.6"], ["undici 7.25.0 → 7.30.1"]])
+        self.assertEqual(report.waiting(recs, hits, {pr1: "OPEN"})[0]["upgrades"], [])      # no plan, none named
         self.assertEqual(report.waiting(recs, hits, {pr1: "CLOSED", pr2: "MERGED", merged: "MERGED"}), [])
         self.assertEqual([x["pr"] for x in report.waiting(recs, {}, {gone: "OPEN"})], [gone])
 
     def test_a_scan_s_digest_is_a_few_plain_lines(self):
         recs = self.records()
-        prs = report.waiting(recs, {"APP": {"CVE-2026-1": True, "CVE-2026-3": None}}, {})
+        prs = report.waiting(recs, {"APP": {"CVE-2026-1": True, "CVE-2026-3": None}}, {}, self.plans())
         def row(adv, sev, ver, kev=None):
             return {"advisory": adv, "severity": sev, "package": "litellm", "version": ver, "kev": kev}
         found = [{"project": "APP", "ref": "origin/main", "open": 4, "new": [row("CVE-2026-1", "medium", "1.82.4", True),
