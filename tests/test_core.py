@@ -1,5 +1,6 @@
 import json
 import shutil
+import ssl
 import tempfile
 import tomllib
 import unittest
@@ -361,6 +362,16 @@ class FeedTests(unittest.TestCase):
         def fetch(url, body):
             raise ValueError("api.osv.dev answered 404")
         self.assertIsNone(Feeds(fetch).advisory("CVE-2099-0001"))
+
+    def test_https_takes_the_os_bundle_only_when_openssl_has_no_ca_file(self):
+        """The node's Python on NixOS has no CA file of its own (CERTIFICATE_VERIFY_FAILED on every request)."""
+        nixos = {"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt"}.__contains__
+        self.assertEqual(feeds.ca_bundle(None, nixos), "/etc/ssl/certs/ca-certificates.crt")
+        self.assertEqual(feeds.ca_bundle(None, {"/etc/pki/tls/certs/ca-bundle.crt"}.__contains__),
+                         "/etc/pki/tls/certs/ca-bundle.crt")                               # Fedora
+        self.assertIsNone(feeds.ca_bundle("/etc/ssl/cert.pem", nixos))                      # OpenSSL's own (macOS)
+        self.assertIsNone(feeds.ca_bundle(None, lambda p: False))                           # none: OpenSSL's paths
+        self.assertIsInstance(feeds.tls(), ssl.SSLContext)
 
 
 class BookTests(unittest.TestCase):
