@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -38,6 +40,8 @@ SIGNALS_DOWN = 600       # and how long, when they couldn't be had, before they'
 EPSS_ASK = 100           # CVEs an EPSS request asks for: its page, and well under its 2,000 characters
 CACHE_FOR = 600          # seconds a recent list is reused
 BATCH = 500              # OSV's querybatch limit is 1000
+# Where Linux distributions keep their CA bundle: Debian, Ubuntu, Arch and NixOS; Fedora and RHEL; openSUSE
+CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/ca-bundle.pem")
 
 # our ecosystem names (as GitHub's) → OSV's
 OSV_ECOSYSTEM = {"rust": "crates.io", "pip": "PyPI", "go": "Go", "npm": "npm", "rubygems": "RubyGems",
@@ -46,6 +50,18 @@ OSV_ECOSYSTEM = {"rust": "crates.io", "pip": "PyPI", "go": "Go", "npm": "npm", "
 GITHUB_ECOSYSTEM = {v: k for k, v in OSV_ECOSYSTEM.items()}
 
 Fetch = Callable[[str, bytes | None], object]
+
+
+def ca_bundle(cafile: str | None, exists: Callable[[str], bool] = os.path.isfile) -> str | None:
+    """The CA file HTTPS should use, given OpenSSL's own (`cafile`, None when it has none): the node's Python on NixOS
+    looks where NixOS keeps none, and fails every request with CERTIFICATE_VERIFY_FAILED, so it takes the bundle the
+    OS keeps. None (OpenSSL's own) when it has one; `SSL_CERT_FILE` counts as its own, OpenSSL reads it."""
+    return None if cafile else next((p for p in CA_BUNDLES if exists(p)), None)
+
+
+@functools.cache
+def tls() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=ca_bundle(ssl.get_default_verify_paths().cafile))
 
 
 def fetch_json(url: str, body: bytes | None = None) -> object:
@@ -57,7 +73,7 @@ def fetch_json(url: str, body: bytes | None = None) -> object:
         "Accept": "application/json", "User-Agent": "pointman-cve",
         **({"Content-Type": "application/json"} if body is not None else {})})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=tls()) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         if e.code == 403 and "rate limit" in (e.read() or b"").decode("utf-8", "replace").lower():
