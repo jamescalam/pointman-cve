@@ -53,7 +53,7 @@ class Impact:
     fixed: str = ""
     fixed_in: str = ""
     prs: list[str] = field(default_factory=list)
-    threads: list[str] = field(default_factory=list)
+    threads: list[str] = field(default_factory=list)  # the channels it was dealt with in: the files' key
     tasks: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     where: list[dict] = field(default_factory=list)   # {repo, file, package, version, fixed_version}
@@ -105,8 +105,8 @@ class Impact:
             if not link.startswith("https://"):
                 raise ValueError(f"a PR is its https:// link, not {link!r}")
         for t in self.threads:
-            if not (t.startswith("pointman://thread/") or t.isdigit()):
-                raise ValueError(f"a thread is pointman://thread/<n> or its number, not {t!r}")
+            if not (t.startswith("pointman://channel/") or t.isdigit()):
+                raise ValueError(f"a channel is pointman://channel/<n> or its number, not {t!r}")
 
     def to_toml(self) -> str:
         lines = []
@@ -145,6 +145,6 @@ def value(v) -> str:
     return f'"{s}"'
 
 
-def thread_link(t: str) -> str:
+def channel_link(t: str) -> str:
     t = t.strip()
-    return f"pointman://thread/{t}" if t.isdigit() else t
+    return f"pointman://channel/{t}" if t.isdigit() else t

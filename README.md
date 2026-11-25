@@ -14,7 +14,7 @@ Keep up with security advisories, and keep a shared record of the ones that touc
   `author=` names who the document says made it.
 - **`/cve report [projects]`** builds a page for whoever reviews and merges the fixes, posted as a file: for each project, the PRs that fix its open advisories (known exploited first, then the most severe), what each fixes, and the open advisories with no PR yet. It reads the records' `prs`, so record a PR on its advisories with `/cve set … pr=` when you open it. It changes nothing.
 - **`/cve check <folder> [project]`** does the same for one folder, read as it is on disk. Name a project and it opens an impact there for each one not yet recorded.
-- **`/cve add <advisory> <project>`** records an advisory that touched a project. **`/cve set`** updates the record: its status, where it hit, and the PRs, threads and tasks that dealt with it.
+- **`/cve add <advisory> <project>`** records an advisory that touched a project. **`/cve set`** updates the record: its status, where it hit, and the PRs, channels and tasks that dealt with it.
 - **`/cve show <advisory>`** shows an advisory and every project's record of it. **`/cve impacts [project]`** lists the records, the open ones first, fix-first.
 - **The pane** opens on your projects: each one's open records, how many are known exploited, and when it was last scanned. Pick one to see:
   - its counts by status;
@@ -22,7 +22,7 @@ Keep up with security advisories, and keep a shared record of the ones that touc
   - each repo's upgrade plan, and when each repo was last scanned, at which ref;
   - its closed records.
 
-  Tap a record to see where it hit, its evidence (PRs, threads, tasks) and its history, newest first. Everything is in rows, which read on a phone. Records change with `/cve set`, not in the pane.
+  Tap a record to see where it hit, its evidence (PRs, channels, tasks) and its history, newest first. Everything is in rows, which read on a phone. Records change with `/cve set`, not in the pane.
 
 Agents run the same commands with `create_job` (`cve.scan`, `cve.recent`, `cve.check`, `cve.add`…). The extension also gives every agent on its nodes a short guide, its behaviour (`SKILL.md`, details in `references/triage.md`):
 
@@ -47,7 +47,7 @@ justification = ""            # VEX's, for not_affected: vulnerable_code_not_in_
 severity = "medium"           # yours, beside the published one
 fixed_in = "release 32"
 prs = ["https://github.com/pointman-ai/pointman/commit/7f5769fa"]
-threads = ["pointman://thread/17856"]
+threads = ["pointman://channel/17856"]
 tasks = ["MB-588"]
 
 [confirmed."pointman-ai/pointman"]   # a scan of that repo found the version gone after it was marked fixed
