@@ -114,6 +114,18 @@ class ExtensionTests(unittest.TestCase):
         self.assertIn("offline", got["text"])                  # the feed wasn't asked
         self.assertIn("- MB: fixed, fixed in release 35", got["text"])
 
+    def test_move_links_counts_unless_told_to_write(self):
+        path = "impacts/mb/cve-2026-1.toml"
+        self.files.versions[path] = ['advisory = ["CVE-2026-1"]\nproject = "MB"\nthreads = ["pointman://thread/50"]\n']
+        self.assertIn("which threads?", self.refused("cve.move_links", {"threads": []}))
+        got = self.run_command("cve.move_links", {"threads": [50]})
+        self.assertEqual((got["written"], got["moved"], len(self.files.versions[path])), (False, {"50": 1}, 1))
+        self.refused("cve.set", {"advisory": "CVE-2026-1", "project": "MB", "note": "x"})       # until they've moved
+        got = self.run_command("cve.move_links", {"threads": [50], "write": True})
+        self.assertEqual((got["written"], got["moved"], len(self.files.versions[path])), (True, {"50": 1}, 2))
+        self.assertIn('threads = ["pointman://channel/50"]', self.files.versions[path][1])
+        self.run_command("cve.set", {"advisory": "CVE-2026-1", "project": "MB", "note": "x"})
+
     def test_not_affected_says_why_as_vex_does_and_every_change_is_kept(self):
         self.run_command("cve.add", {"advisory": "CVE-2026-77", "project": "MB", "by": "@scanner-agent",
                                      "note": "zstd-safe 7.3.0 in node/Cargo.lock"})

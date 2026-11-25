@@ -25,7 +25,7 @@ from pointman_extension import Extension, Refused, Retry
 from pointman_extension_types import (Block, Chart, Empty, Input, Layout, List, PaneContent, PaneOpenResponse, Text,
                                       Tone)
 
-from . import lockfiles, report, repos, scans, vex
+from . import lockfiles, move_links, report, repos, scans, vex
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
 from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, slug, channel_link
 from .store import Book, store_for
@@ -439,6 +439,16 @@ def confirmation(i: Impact) -> str:
                    + f" on {str(c.get('at'))[:10]}" for repo, c in sorted(i.confirmed.items()))
     left = sorted(i.repos - set(i.confirmed))
     return f", confirmed in {at}" + (f"; not yet in {', '.join(left)}" if left else "")
+
+
+@ext.command("cve.move_links")
+def move_links_(job):
+    """One-off for the switchover, taken out in the next version (move_links.py)."""
+    threads = {str(int(t)) for t in job.params.get("threads") or []}
+    if not threads:
+        raise Refused("which threads? threads=[…]: the ids whose links may move")
+    got = move_links.move(book().store, threads, job.params.get("write") is True)
+    return {**got, "text": move_links.said(got)}
 
 
 @ext.command("cve.vex")
