@@ -7,7 +7,7 @@
 - `/cve check <folder> [project]`: which advisories hit the versions a folder's lockfiles pin, as they are on disk;
   with a project, an impact is opened for each one not yet recorded.
 - `/cve add <advisory> <project>`, `/cve set <advisory> <project> …`: our record of one that touched a project,
-  with its status, where it hit, and the PRs, threads and tasks that dealt with it.
+  with its status, where it hit, and the PRs, channels and tasks that dealt with it.
 - `/cve show <advisory>`, `/cve impacts [project]`: what we know, in a pane too.
 
 Nothing runs on its own: a scan is asked for, by a person or a workflow that follows `cve.scanned`.
@@ -25,9 +25,9 @@ from pointman_extension import Extension, Refused, Retry
 from pointman_extension_types import (Block, Chart, Empty, Input, Layout, List, PaneContent, PaneOpenResponse, Text,
                                       Tone)
 
-from . import lockfiles, report, repos, scans, vex
+from . import lockfiles, move_links, report, repos, scans, vex
 from .feeds import GITHUB_ECOSYSTEM, OSV_ECOSYSTEM, Advisory, Feeds
-from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, slug, thread_link
+from .impacts import JUSTIFICATIONS, STATUSES, Impact, now, slug, channel_link
 from .store import Book, store_for
 
 SHOWN = 12                          # advisories a command's text lists
@@ -394,8 +394,8 @@ def apply(imp: Impact, p: dict) -> None:
         for v in split(p.get(key)):
             if v not in getattr(imp, attr):
                 getattr(imp, attr).append(v)
-    for t in split(p.get("thread")):
-        link = thread_link(t)
+    for t in split(p.get("channel")):
+        link = channel_link(t)
         if link not in imp.threads:
             imp.threads.append(link)
     if p.get("fixed_in"):
@@ -439,6 +439,16 @@ def confirmation(i: Impact) -> str:
                    + f" on {str(c.get('at'))[:10]}" for repo, c in sorted(i.confirmed.items()))
     left = sorted(i.repos - set(i.confirmed))
     return f", confirmed in {at}" + (f"; not yet in {', '.join(left)}" if left else "")
+
+
+@ext.command("cve.move_links")
+def move_links_(job):
+    """One-off for the switchover, taken out in the next version (move_links.py)."""
+    threads = {str(int(t)) for t in job.params.get("threads") or []}
+    if not threads:
+        raise Refused("which threads? threads=[…]: the ids whose links may move")
+    got = move_links.move(book().store, threads, job.params.get("write") is True)
+    return {**got, "text": move_links.said(got)}
 
 
 @ext.command("cve.vex")
@@ -680,7 +690,7 @@ def record_blocks(path: str) -> tuple[str, list[Block]]:
              for n, w in enumerate(r.where) if w.get("package")]
     evidence = ([List.Item(id=f"pr{n}", title=link.rsplit("/", 2)[-2] + "/" + link.rsplit("/", 1)[-1], subtitle=link, link=link)
                  for n, link in enumerate(r.prs)]
-                + [List.Item(id=f"t{n}", title=f"Thread {t.rsplit('/', 1)[-1]}", link=t) for n, t in enumerate(r.threads)]
+                + [List.Item(id=f"t{n}", title=f"Channel {t.rsplit('/', 1)[-1]}", link=t) for n, t in enumerate(r.threads)]
                 + [List.Item(id=f"k{n}", title=t, link=f"pointman://item/{t}") for n, t in enumerate(r.tasks)])
     history = [List.Item(id=f"h{n}", title=(f"{h['was'].replace('_', ' ')} → " if h.get("was") else "")
                          + str(h.get("status", "")).replace("_", " ")
@@ -695,7 +705,7 @@ def record_blocks(path: str) -> tuple[str, list[Block]]:
               Block(name="about", text=Text(markdown="\n\n".join(x for x in about if x))),
               heading("wh", "Where it hit", f"{len(where)} place{'s' if len(where) != 1 else ''}"),
               rows("where", where, tap=False) if where else empty("where", "No place named", "It was recorded by hand."),
-              heading("eh", "Evidence", "PRs, threads and tasks"),
+              heading("eh", "Evidence", "PRs, channels and tasks"),
               rows("evidence", evidence, tap=False) if evidence else empty("evidence", "None yet",
                                                                            "fixed needs a PR, commit or release."),
               heading("hh", "History", "newest first"),

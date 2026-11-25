@@ -90,7 +90,7 @@ class ExtensionTests(unittest.TestCase):
 
     def test_record_update_and_list_an_impact(self):
         got = self.run_command("cve.add", {"advisory": "CVE-2026-1234", "project": "mb", "package": "rustls-webpki",
-                                           "version": "0.103.15", "thread": "17856", "note": "found in the sweep"})
+                                           "version": "0.103.15", "channel": "17856", "note": "found in the sweep"})
         self.assertEqual(got["impact"], "impacts/mb/cve-2026-1234.toml")
         self.assertEqual(got["pane"], {"open": "cve", "target": {"view": "impacts", "project": "MB"}})
         self.assertIn("already recorded", self.refused("cve.add", {"advisory": "CVE-2026-1234", "project": "MB"}))
@@ -103,7 +103,7 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(got["version"], 2, got)
         text = self.files.versions["impacts/mb/cve-2026-1234.toml"][1]
         self.assertIn('status = "fixed"', text)
-        self.assertIn('threads = ["pointman://thread/17856"]', text)
+        self.assertIn('threads = ["pointman://channel/17856"]', text)
         self.assertIn("found in the sweep", text)
         asked = [(m, getattr(r, "path", None)) for m, r in self.node.asked if m == "files.put"]
         self.assertEqual(asked, [("files.put", "impacts/mb/cve-2026-1234.toml")] * 2)
@@ -113,6 +113,18 @@ class ExtensionTests(unittest.TestCase):
         got = self.run_command("cve.show", {"advisory": "CVE-2026-1234"})
         self.assertIn("offline", got["text"])                  # the feed wasn't asked
         self.assertIn("- MB: fixed, fixed in release 35", got["text"])
+
+    def test_move_links_counts_unless_told_to_write(self):
+        path = "impacts/mb/cve-2026-1.toml"
+        self.files.versions[path] = ['advisory = ["CVE-2026-1"]\nproject = "MB"\nthreads = ["pointman://thread/50"]\n']
+        self.assertIn("which threads?", self.refused("cve.move_links", {"threads": []}))
+        got = self.run_command("cve.move_links", {"threads": [50]})
+        self.assertEqual((got["written"], got["moved"], len(self.files.versions[path])), (False, {"50": 1}, 1))
+        self.refused("cve.set", {"advisory": "CVE-2026-1", "project": "MB", "note": "x"})       # until they've moved
+        got = self.run_command("cve.move_links", {"threads": [50], "write": True})
+        self.assertEqual((got["written"], got["moved"], len(self.files.versions[path])), (True, {"50": 1}, 2))
+        self.assertIn('threads = ["pointman://channel/50"]', self.files.versions[path][1])
+        self.run_command("cve.set", {"advisory": "CVE-2026-1", "project": "MB", "note": "x"})
 
     def test_not_affected_says_why_as_vex_does_and_every_change_is_kept(self):
         self.run_command("cve.add", {"advisory": "CVE-2026-77", "project": "MB", "by": "@scanner-agent",

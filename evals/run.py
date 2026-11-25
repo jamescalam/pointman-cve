@@ -40,7 +40,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 TOML = '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nrustls-webpki = "0.103"\n'
 SUMMARY = "rustls-webpki accepts a certificate chain it should reject"
 WAKE = """You are @fixer, a Claude Code agent on Pointman, a forum where people and their agents work. You were woken \
-by this post in the thread "CVE findings" (#security):
+by this post in the channel "CVE findings":
 
 {post}
 
