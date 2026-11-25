@@ -9,7 +9,7 @@ from pathlib import Path
 
 from gitrepo import Repo, git
 import schema
-from pointman_cve import cvss, feeds, lockfiles, report, repos, scans, store, versions, vex
+from pointman_cve import cvss, feeds, lockfiles, move_links, report, repos, scans, store, versions, vex
 from pointman_cve.feeds import Feeds, from_github, from_osv, merge_aliases
 from pointman_cve.impacts import Impact, path_of, slug
 from pointman_cve.store import Book, DirStore, path_ok
@@ -389,6 +389,85 @@ class BookTests(unittest.TestCase):
             self.assertEqual([i.advisory[0] for i in b.for_advisory(["ghsa-a"])], ["CVE-2026-1"])
             self.assertIsNone(b.load("MB", "CVE-2026-404"))
 
+
+
+class MoveLinksTests(unittest.TestCase):
+    """The one-off `cve.move_links`, on DirStore: threads 50 and 7 are named, nothing else may move."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = DirStore(tmp.name)
+
+    def record(self, n: int, *links: str, **more) -> str:
+        path = f"impacts/mb/cve-2026-{n}.toml"
+        self.store.put(path, Impact(advisory=[f"CVE-2026-{n}"], project="MB", threads=list(links), **more).to_toml())
+        return path
+
+    def move(self, write=False):
+        return move_links.move(self.store, {"50", "7"}, write)
+
+    def versions(self) -> dict[str, int]:
+        return {f["path"]: f["version"] for f in self.store.list("impacts/")}
+
+    def test_it_counts_and_writes_nothing_until_told_to(self):
+        a = self.record(1, "pointman://thread/50", "pointman://thread/7")
+        b = self.record(2, "pointman://thread/50")
+        c = self.record(3, "pointman://channel/50")
+        was = {p: self.store.get(p) for p in (a, b, c)}
+        got = self.move()
+        self.assertEqual(got, {"records": 3, "changed": 2, "written": False, "moved": {"7": 1, "50": 2}, "left": [],
+                               "refused": []})
+        self.assertIn("3 records: 3 links in 2 to move (nothing written", move_links.said(got))
+        self.assertEqual({p: self.store.get(p) for p in was}, was)
+        self.assertEqual(set(self.versions().values()), {1})
+
+    def test_a_write_changes_only_the_links_and_a_second_run_finds_none(self):
+        # kept as written, not as to_toml would write it: a key it doesn't know, and a comment
+        text = ('# by hand\nadvisory = ["CVE-2026-1"]\nproject = "MB"\nthreads = ["pointman://thread/50"]\nours = 1\n'
+                'notes = ["said in pointman://thread/7."]\n[[history]]\nat = "x"\nevidence = ["pointman://thread/50"]\n')
+        self.store.put("impacts/mb/cve-2026-1.toml", text)
+        other = self.record(2, "pointman://channel/9")
+        got = self.move(write=True)
+        self.assertEqual((got["changed"], got["written"], got["moved"], got["left"]), (1, True, {"7": 1, "50": 2}, []))
+        self.assertEqual(self.store.get("impacts/mb/cve-2026-1.toml"), text.replace("://thread/", "://channel/"))
+        self.assertEqual(self.versions(), {"impacts/mb/cve-2026-1.toml": 2, other: 1})
+        again = self.move(write=True)
+        self.assertEqual((again["changed"], again["moved"], again["left"]), (0, {"7": 0, "50": 0}, []))
+        self.assertEqual(self.versions(), {"impacts/mb/cve-2026-1.toml": 2, other: 1})
+        self.assertIn("No other old link.", move_links.said(again))
+
+    def test_every_other_form_stays_as_written_and_is_listed(self):
+        forms = ["pointman://thread/51", "pointman://thread/50?post=9", "pointman://thread/50/?post=9&side=1",
+                 "pointman://thread/500", "pointman://thread/75", "messageboard://thread/50", "thr_50"]
+        path = self.record(1, notes=forms)                # a note each: `threads` takes none of them
+        was = self.store.get(path)
+        got = self.move(write=True)
+        self.assertEqual((got["changed"], got["moved"]), (0, {"7": 0, "50": 0}))
+        self.assertEqual(got["left"], [{"record": path, "links": forms}])
+        self.assertEqual((self.store.get(path), self.versions()[path]), (was, 1))
+        self.assertIn(f"- Left in {path}: {', '.join(forms)}", move_links.said(got))
+        both = self.record(2, "pointman://thread/50", notes=["pointman://thread/50?post=9"])
+        got = self.move(write=True)                       # beside one that moves, in one record
+        self.assertEqual((got["changed"], got["left"][1]), (1, {"record": both, "links": ["pointman://thread/50?post=9"]}))
+
+    def test_a_record_that_fails_its_check_is_listed_and_the_rest_go_on(self):
+        mixed = self.record(1, "pointman://thread/50", "pointman://thread/51")         # 51 isn't named: still refused
+        broken = "impacts/mb/cve-2026-2.toml"
+        self.store.put(broken, 'advisory = ["CVE-2026-2"]\nthreads = ["pointman://thread/50"\n')      # not TOML
+        bare = "impacts/mb/cve-2026-3.toml"
+        self.store.put(bare, 'title = "pointman://thread/50"\n')                                       # no advisory
+        odd = "impacts/mb/cve-2026-4.toml"
+        self.store.put(odd, 'advisory = [4]\nproject = "MB"\nthreads = ["pointman://thread/50"]\n')
+        good = self.record(5, "pointman://thread/7")
+        for write in (False, True):
+            got = self.move(write)
+            self.assertEqual([x["record"] for x in got["refused"]], [mixed, broken, bare, odd])
+            self.assertIn("not 'pointman://thread/51'", got["refused"][0]["why"])
+            self.assertEqual((got["changed"], got["moved"]), (1, {"7": 1, "50": 0}))
+            self.assertEqual([x["record"] for x in got["left"]], [mixed, broken, bare, odd])
+        self.assertEqual(self.versions(), {mixed: 1, broken: 1, bare: 1, odd: 1, good: 2})
+        self.assertIn(f"- Not written, {mixed}: a channel is", move_links.said(got))
 
 
 class DroppedCallTests(unittest.TestCase):
@@ -1008,6 +1087,15 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual((scan["slash"], list(scan["params"]["properties"])), ("scan", ["project"]))
         self.assertEqual([e["name"] for e in m["events"]], ["cve.scanned"])
         self.assertNotIn("post", m["permissions"])
+
+    def test_move_links_takes_its_threads_and_nothing_misspelt(self):
+        m = tomllib.loads((ROOT / "extension.toml").read_text())
+        params = next(c for c in m["commands"] if c["kind"] == "cve.move_links")["params"]
+        for ok in ({"threads": [50]}, {"threads": [50, 7], "write": True}):
+            self.assertEqual(schema.errors(ok, params), [])
+        for bad in ({}, {"threads": []}, {"threads": ["50"]}, {"threads": [0]}, {"threads": [50], "wrte": True},
+                    {"threads": [50], "write": "true"}):
+            self.assertTrue(schema.errors(bad, params), bad)
 
 
 if __name__ == "__main__":

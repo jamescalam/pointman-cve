@@ -85,6 +85,12 @@ params = { type = "object", required = ["advisory", "project"], properties = { a
 slash = "set"
 summary = "Update an impact: /cve set CVE-2026-1234 MB fixed pr=https://github.com/…"
 
+[[commands]]                      # one-off for the switchover: taken out in the next version
+kind = "cve.move_links"
+lane = "records"
+title = "Move records' old thread links to channel links"
+params = { type = "object", required = ["threads"], additionalProperties = false, properties = { threads = { type = "array", minItems = 1, items = { type = "integer", minimum = 1 }, description = "The threads whose links may move: each kept its number as a channel." }, write = { type = "boolean", default = false, description = "Write the new versions; left out, it only counts." } } }
+
 [[commands]]
 kind = "cve.vex"
 title = "OpenVEX export of a project's records"
