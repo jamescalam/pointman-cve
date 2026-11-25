@@ -90,7 +90,7 @@ class ExtensionTests(unittest.TestCase):
 
     def test_record_update_and_list_an_impact(self):
         got = self.run_command("cve.add", {"advisory": "CVE-2026-1234", "project": "mb", "package": "rustls-webpki",
-                                           "version": "0.103.15", "thread": "17856", "note": "found in the sweep"})
+                                           "version": "0.103.15", "channel": "17856", "note": "found in the sweep"})
         self.assertEqual(got["impact"], "impacts/mb/cve-2026-1234.toml")
         self.assertEqual(got["pane"], {"open": "cve", "target": {"view": "impacts", "project": "MB"}})
         self.assertIn("already recorded", self.refused("cve.add", {"advisory": "CVE-2026-1234", "project": "MB"}))
@@ -103,7 +103,7 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(got["version"], 2, got)
         text = self.files.versions["impacts/mb/cve-2026-1234.toml"][1]
         self.assertIn('status = "fixed"', text)
-        self.assertIn('threads = ["pointman://thread/17856"]', text)
+        self.assertIn('threads = ["pointman://channel/17856"]', text)
         self.assertIn("found in the sweep", text)
         asked = [(m, getattr(r, "path", None)) for m, r in self.node.asked if m == "files.put"]
         self.assertEqual(asked, [("files.put", "impacts/mb/cve-2026-1234.toml")] * 2)

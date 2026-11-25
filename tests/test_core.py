@@ -23,7 +23,7 @@ class ImpactTests(unittest.TestCase):
         return Impact(advisory=["emudhra-g3-distrust"], project="MB", title="eMudhra G3 intermediates computable",
                       status="fixed", severity="medium", fixed_in="release 32",
                       prs=["https://github.com/pointman-ai/pointman/commit/7f5769fa"],
-                      threads=["pointman://thread/17856"], tasks=["MB-588", "MB-589"],
+                      threads=["pointman://channel/17856"], tasks=["MB-588", "MB-589"],
                       notes=['2026-10-22: rustls-webpki "0.103.16" denylists them'],
                       where=[{"repo": "pointman-ai/pointman", "file": "node/Cargo.lock", "package": "rustls-webpki",
                               "version": "0.103.15", "fixed_version": "0.103.16"}])
@@ -75,7 +75,7 @@ class ImpactTests(unittest.TestCase):
     def test_checks(self):
         for change, says in [({"status": "done"}, "status"), ({"project": "my project"}, "project"),
                              ({"status": "not_affected"}, "says why"), ({"prs": ["#42"]}, "https"),
-                             ({"threads": ["general"]}, "thread"), ({"severity": "huge"}, "severity")]:
+                             ({"threads": ["general"]}, "channel"), ({"severity": "huge"}, "severity")]:
             imp = self.emudhra()
             for k, v in change.items():
                 setattr(imp, k, v)
